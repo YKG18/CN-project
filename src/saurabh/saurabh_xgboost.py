@@ -176,6 +176,14 @@ class SaurabhXGBoost:
     seed: int = 42
     early_stopping_rounds: int = 50
 
+    # -----------------------------------------------------------------
+    # Ablation switches
+    # -----------------------------------------------------------------
+
+    use_correlation_graph: bool = True
+    use_dynamic_threshold: bool = True
+    use_shap_drift: bool = True
+
     params: dict[str, Any] = field(
         default_factory=lambda: dict(SAURABH_XGBOOST_PARAMS)
     )
@@ -310,27 +318,32 @@ class SaurabhXGBoost:
         self.n_input_features_ = int(X_train.shape[1])
 
         # -------------------------------------------------------------
-        # MODULE A
-        # Fit benign correlation baseline ONLY on training data.
+        # MODULE A — Correlation behavioural graph
         # -------------------------------------------------------------
 
-        self.correlation_graph.fit(
-            X_train,
-            y_train,
-        )
+        if self.use_correlation_graph:
+            # Fit benign correlation baseline ONLY on training data.
+            self.correlation_graph.fit(
+                X_train,
+                y_train,
+            )
 
-        X_train_graph = self.correlation_graph.transform(
-            X_train,
-            block_ids=train_block_ids,
-        )
+            X_train_model = self.correlation_graph.transform(
+                X_train,
+                block_ids=train_block_ids,
+            )
 
-        X_val_graph = self.correlation_graph.transform(
-            X_val,
-            block_ids=val_block_ids,
-        )
+            X_val_model = self.correlation_graph.transform(
+                X_val,
+                block_ids=val_block_ids,
+            )
+        else:
+            # Ablation baseline: use the original feature space.
+            X_train_model = X_train
+            X_val_model = X_val
 
         self.n_model_features_ = int(
-            X_train_graph.shape[1]
+            X_train_model.shape[1]
         )
 
         # -------------------------------------------------------------
@@ -356,10 +369,10 @@ class SaurabhXGBoost:
         )
 
         self.model.fit(
-            X_train_graph,
+            X_train_model,
             y_train,
             eval_set=[
-                (X_val_graph, y_val)
+                (X_val_model, y_val)
             ],
             verbose=False,
         )
@@ -371,36 +384,39 @@ class SaurabhXGBoost:
         )
 
         # -------------------------------------------------------------
-        # MODULE B
-        # Learn adaptive thresholds from VALIDATION ONLY.
-        # -------------------------------------------------------------
-
-        p_val = self.model.predict_proba(
-            X_val_graph
-        )[:, 1]
-
-        self.dynamic_threshold.fit(
-            y_val,
-            p_val,
-            block_ids=val_block_ids,
-        )
-
-        self.validation_threshold_statistics_ = (
-            self.dynamic_threshold.threshold_statistics()
-        )
-
-        # -------------------------------------------------------------
-        # MODULE C
-        # Fit SHAP reference ranking on TRAINING ONLY.
+        # MODULE B — Dynamic adaptive threshold
         #
-        # The SHAP detector observes the final model and transformed
-        # training feature space.
+        # Learn thresholds from VALIDATION ONLY.
         # -------------------------------------------------------------
 
-        self.shap_drift.fit(
-            self.model,
-            X_train_graph,
-        )
+        if self.use_dynamic_threshold:
+            p_val = self.model.predict_proba(
+                X_val_model
+            )[:, 1]
+
+            self.dynamic_threshold.fit(
+                y_val,
+                p_val,
+                block_ids=val_block_ids,
+            )
+
+            self.validation_threshold_statistics_ = (
+                self.dynamic_threshold.threshold_statistics()
+            )
+        else:
+            self.validation_threshold_statistics_ = None
+
+        # -------------------------------------------------------------
+        # MODULE C — SHAP drift
+        #
+        # Fit the training reference only when this module is enabled.
+        # -------------------------------------------------------------
+
+        if self.use_shap_drift:
+            self.shap_drift.fit(
+                self.model,
+                X_train_model,
+            )
 
         self.fitted_ = True
 
@@ -448,15 +464,18 @@ class SaurabhXGBoost:
             "block_ids",
         )
 
-        X_graph = self.correlation_graph.transform(
-            X,
-            block_ids=block_ids,
-        )
+        # Apply Module A only when enabled.
+        if self.use_correlation_graph:
+            X_model = self.correlation_graph.transform(
+                X,
+                block_ids=block_ids,
+            )
+        else:
+            X_model = X
 
         probabilities = self.model.predict_proba(
-            X_graph
+            X_model
         )[:, 1]
-
         return probabilities
 
     # -----------------------------------------------------------------
@@ -480,11 +499,14 @@ class SaurabhXGBoost:
             block_ids=block_ids,
         )
 
-        return self.dynamic_threshold.predict(
-            probabilities,
-            block_ids=block_ids,
-        )
+        # Module B ablation: use the standard fixed threshold.
+        if self.use_dynamic_threshold:
+            return self.dynamic_threshold.predict(
+                probabilities,
+                block_ids=block_ids,
+            )
 
+        return (probabilities >= 0.5).astype(np.int64)
     # -----------------------------------------------------------------
     # SHAP drift analysis
     # -----------------------------------------------------------------
@@ -537,17 +559,23 @@ class SaurabhXGBoost:
                     "block_ids must contain one value per sample"
                 )
 
-        # Module A: reconstruct the correlation-behavioural feature
-        # using the fitted benign baseline.
-        X_graph = self.correlation_graph.transform(
-            X,
-            block_ids=block_ids,
-        )
+        if not self.use_shap_drift:
+            raise RuntimeError(
+                "SHAP drift detection is disabled for this ablation run"
+            )
 
-        # Module C: compare SHAP importance rankings against the
-        # training reference. No labels are required.
-        return self.shap_drift.transform(X_graph)
+        # Apply Module A only when enabled.
+        if self.use_correlation_graph:
+            X_model = self.correlation_graph.transform(
+                X,
+                block_ids=block_ids,
+            )
+        else:
+            X_model = X
 
+        # Compare SHAP importance rankings against the training reference.
+        # No labels are required.
+        return self.shap_drift.transform(X_model)
     def detect_shap_drift(
         self,
         X: np.ndarray,

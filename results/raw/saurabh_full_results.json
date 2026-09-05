@@ -1,0 +1,62 @@
+{
+  "experiment": "saurabh_full",
+  "dataset": "ncsrd",
+  "feature_set": "saurabh49",
+  "seed": 42,
+  "split_file": "C:\\Users\\fadis\\Documents\\CN-project\\data\\ncsrd\\processed\\split_project_standard.npz",
+  "samples": {
+    "train": 296846,
+    "validation": 41313,
+    "test": 86062
+  },
+  "model": {
+    "input_features": 49,
+    "model_features": 50,
+    "graph_feature_added": 1,
+    "scale_pos_weight": 14.86308983059905,
+    "best_iteration": 131,
+    "n_trees": 132,
+    "correlation_window_size": 500,
+    "threshold_window_size": 500,
+    "shap_window_size": 1000,
+    "threshold_statistics": {
+      "min": 0.3,
+      "mean": 0.3067676767676767,
+      "max": 0.97,
+      "std": 0.06699658189424056,
+      "n_windows": 99,
+      "global_threshold": 0.3,
+      "global_f1": 0.7515243902439024
+    }
+  },
+  "metrics": {
+    "accuracy": 0.9982686900141758,
+    "precision": 0.9738134206219312,
+    "recall": 0.9990671641791045,
+    "f1": 0.9862786628603002,
+    "roc_auc": 0.9999248502043819,
+    "false_positive_rate": 0.001784342395479666
+  },
+  "confusion_matrix": {
+    "true_positive": 5355,
+    "false_positive": 144,
+    "false_negative": 5,
+    "true_negative": 80558
+  },
+  "performance": {
+    "training_seconds": 2.96258590000798,
+    "test_inference_seconds": 0.15295440002228133,
+    "test_inference_ms_per_sample": 0.001777258255935039,
+    "shap_drift_seconds": 0.6725864000036381
+  },
+  "shap_drift": {
+    "enabled": true,
+    "analysis_seconds": 0.6725864000036381,
+    "mean_kendall_tau": 0.9234171808258187,
+    "min_kendall_tau": 0.8693877551020408,
+    "max_kendall_tau": 0.9559183673469387,
+    "n_windows": 86,
+    "drift_windows": 0,
+    "drift_rate": 0.0
+  }
+}
