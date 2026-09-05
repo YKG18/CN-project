@@ -1,0 +1,38 @@
+# --- data -------------------------------------------------------------
+# Raw and processed datasets are large. Download them instead of committing.
+# NCSRD-DS-5GDDoS : https://zenodo.org/records/13900057
+# Data4Cyber      : https://zenodo.org/records/19965384
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# Large capture / dataset files, wherever they end up
+*.pcapng
+*.pcap
+*.jsonl.gz
+*.npz
+*.parquet
+
+# --- generated outputs ------------------------------------------------
+results/**
+!results/**/
+!results/**/.gitkeep
+experiments/**/outputs/
+outputs/
+*.pkl
+*.joblib
+
+# --- python -----------------------------------------------------------
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+.python-version
+
+# --- editors / os -----------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

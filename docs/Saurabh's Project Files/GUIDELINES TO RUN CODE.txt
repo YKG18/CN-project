@@ -1,0 +1,377 @@
+
+# 📄 Project Execution Guidelines
+
+## ML-Based DDoS Detection in 5G Networks
+
+---
+
+## 📌 1. Project Overview
+
+This project implements a **machine learning-based anomaly detection system** for detecting **DDoS attacks in 5G/B5G networks** using the **NCSRD-DS-5GDDoS dataset**.
+
+The system includes:
+
+* Baseline ML model (XGBoost)
+* Correlation-based anomaly detection
+* Adaptive thresholding
+* SHAP-based drift detection
+
+📊 Final performance improves from:
+
+* **Baseline F1 Score:** 0.9573
+* **Best Model F1 Score:** 0.9730 
+
+---
+
+## 📥 2. Dataset Details (IMPORTANT)
+
+### 📌 Dataset Name
+
+**NCSRD-DS-5GDDoS Dataset**
+
+### 📌 Source
+
+Available on **Zenodo**
+
+### 📌 Download Link
+
+👉 [https://zenodo.org/records/13900057](https://zenodo.org/records/13900057)
+
+*(If link changes, search: “NCSRD-DS-5GDDoS dataset Zenodo”)*
+
+---
+
+### 📦 What to Download
+
+After opening the link:
+
+* Download the **CSV dataset file(s)**
+* Extract if compressed (.zip)
+
+---
+
+### 📁 Dataset Placement
+
+After downloading:
+
+```bash
+project_root/
+│
+├── data/
+│   └── dataset.csv   ← place file here
+```
+
+⚠️ Ensure:
+
+* File path is correct
+* Update path in notebooks if needed:
+
+```python
+data_path = "data/dataset.csv"
+```
+
+---
+
+### 📊 Dataset Description
+
+* ~400K+ samples
+* ~49 features
+* Includes:
+
+  * Network traffic statistics
+  * Radio metrics
+  * Bearer-level data
+* Labels:
+
+  * `0 → Benign`
+  * `1 → Attack`
+
+---
+
+## ⚙️ 3. System Requirements
+
+### 💻 Hardware
+
+* Minimum: 8 GB RAM
+* Recommended: 16 GB RAM
+
+---
+
+### 🧠 Software
+
+* Python ≥ 3.9
+* Jupyter Notebook
+
+---
+
+## 🛠️ 4. Environment Setup
+
+### Step 1: Create Virtual Environment
+
+```bash
+python -m venv venv
+```
+
+---
+
+### Step 2: Activate Environment
+
+* Windows:
+
+```bash
+venv\Scripts\activate
+```
+
+* Linux/Mac:
+
+```bash
+source venv/bin/activate
+```
+
+---
+
+### Step 3: Install Dependencies
+
+Create `requirements.txt`:
+
+```txt
+numpy
+pandas
+matplotlib
+seaborn
+scikit-learn
+xgboost
+imbalanced-learn
+shap
+tqdm
+joblib
+networkx
+```
+
+Install:
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+### Step 4: Launch Jupyter
+
+```bash
+pip install notebook
+jupyter notebook
+```
+
+---
+
+## ▶️ 5. Execution Steps (Run in Order)
+
+⚠️ **IMPORTANT: Do NOT skip steps**
+
+---
+
+### 📘 Notebook 01 — Data Understanding
+
+* Loads dataset
+* Displays structure and feature types
+
+---
+
+### 📘 Notebook 02 — EDA
+
+* Feature distributions
+* Correlation analysis
+* Attack vs benign comparison
+
+---
+
+### 📘 Notebook 03 — Preprocessing
+
+* Data cleaning
+* Feature scaling
+* Label encoding
+* Train-test split
+
+---
+
+### 📘 Notebook 04 — Model Training
+
+* XGBoost model
+* SMOTE balancing
+* Evaluation metrics
+
+📌 Expected:
+
+* F1 ≈ 0.95+
+
+⚠️ Fix (if plots blank):
+
+```python
+plt.savefig("plot.png")
+plt.show()
+```
+
+---
+
+### 📘 Notebook 05 — Correlation Graph
+
+* Builds correlation matrix
+* Computes Frobenius divergence
+* Adds structural anomaly feature
+
+📌 Outcome:
+
+* Reduced false positives
+
+---
+
+### 📘 Notebook 06 — Adaptive Threshold
+
+* Computes threshold per window
+* Uses precision-recall optimization
+
+📌 Outcome:
+
+* Best performance (F1 ≈ 0.973)
+
+---
+
+### 📘 Notebook 07 — SHAP Drift Detection
+
+* Tracks feature importance changes
+* Detects pattern shifts
+
+📌 Outcome:
+
+* Interpretability + drift detection
+
+---
+
+### 📘 Notebook 08 — Integration & Ablation
+
+* Combines all techniques
+* Compares all configurations
+
+📌 Output:
+
+* Final comparison table
+* ROC curves
+* SHAP comparison
+
+---
+
+## 📊 6. Expected Outputs
+
+After full execution:
+
+### ✔ Model Files
+
+* `.pkl` trained models
+
+### ✔ Result Files
+
+* `.json` (metrics)
+* `.csv` (ablation table)
+
+### ✔ Plots
+
+* ROC curves
+* Confusion matrices
+* SHAP plots
+* Threshold graphs
+
+---
+
+## 📈 7. Final Results
+
+| Model Variant      | F1 Score   |
+| ------------------ | ---------- |
+| Baseline           | 0.9573     |
+| +Graph             | 0.9653     |
+| +SHAP              | 0.9625     |
+| Adaptive Threshold | **0.9730** |
+| Combined           | 0.9648     |
+
+---
+
+## ⚠️ 8. Important Notes
+
+### 🔸 Dataset Not Included
+
+Due to size limitations, dataset is NOT uploaded.
+User must download manually.
+
+---
+
+### 🔸 Notebook Dependency
+
+Each notebook depends on previous outputs.
+
+---
+
+### 🔸 Runtime
+
+* Full pipeline: ~30–60 minutes depending on system
+
+---
+
+### 🔸 Memory Usage
+
+* High during model training (Notebook 04)
+
+---
+
+## 🚀 9. How to Validate Correct Execution
+
+You should observe:
+
+✔ Model trains successfully
+✔ Metrics near expected values
+✔ Graph divergence spikes during attacks
+✔ Adaptive threshold varies dynamically
+✔ SHAP shows feature importance shifts
+✔ Final ablation table generated
+
+---
+
+## 🧠 10. Key Contributions
+
+* Structural anomaly detection using correlations
+* Dynamic thresholding for real-time systems
+* Explainable AI with SHAP drift detection
+* Fully reproducible pipeline
+
+---
+
+## 📌 11. Troubleshooting
+
+| Issue             | Solution                  |
+| ----------------- | ------------------------- |
+| Dataset not found | Check file path           |
+| Memory error      | Reduce sample size        |
+| Blank plots       | Fix `savefig()` order     |
+| Low performance   | Ensure preprocessing done |
+
+---
+
+## 📬 12. Submission Note
+
+Due to file size constraints:
+
+* Only **code files (.ipynb)** are submitted
+* Dataset must be downloaded separately
+* This document provides full execution instructions
+
+---
+
+## ✅ 13. Conclusion
+
+This project demonstrates a **complete, reproducible ML pipeline** for DDoS detection with **novel improvements over baseline methods**, making it suitable for:
+
+* Academic submission
+* Research publication
+* Real-world deployment
+
+---
+
