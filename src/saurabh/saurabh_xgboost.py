@@ -1,84 +1,1290 @@
 """
 Saurabh Methodology - Integrated XGBoost Pipeline for Data4Cyber.
 
-Combines three methodology modules with a leakage-safe evaluation policy.
+Single-file implementation combining:
 
-Module A - Correlation Behavioural Graph
-    Learns a static benign Pearson-correlation baseline from TRAINING data
-    only and appends a graph_frob_div feature to each row.
+Module A — Correlation Behavioural Graph
+    Builds a static benign Pearson-correlation baseline from TRAINING data
+    and appends graph_frob_div as an additional feature.
 
-Module B - Dynamic Adaptive Threshold
+Module B — Dynamic Adaptive Threshold
     Learns classification thresholds from VALIDATION probabilities and labels
     only. Test labels are never used for threshold selection.
 
-Module C - SHAP Drift Detection
-    Learns a reference SHAP feature-importance ranking from TRAINING data only
+Module C — SHAP Drift Detection
+    Learns a reference SHAP feature-importance ranking from TRAINING data
     and detects ranking drift in later windows without using their labels.
 
 IMPORTANT SPLIT POLICY
 ----------------------
-This model NEVER creates train/validation/test splits.
-
-The caller must use the frozen Data4Cyber splits produced by:
-
-    common/data/data4cyber/_prep.py
-
-For the primary experiment:
-
-    adapter = Data4CyberAdapter(split_mode="block")
-    bundle = adapter.for_xgboost(balance="class_weight")
-
-Block identifiers stored in bundle.meta are passed to all methodology modules
-that construct temporal windows. This guarantees that windows never combine
-rows from different contiguous blocks.
-
-Typical workflow
-----------------
-
-    from common.data.data4cyber_adapter import Data4CyberAdapter
-    from saurabh.saurabh_xgboost import SaurabhXGBoost
-
-    adapter = Data4CyberAdapter(split_mode="block")
-    bundle = adapter.for_xgboost(balance="class_weight")
-
-    model = SaurabhXGBoost()
-
-    model.fit(
-        bundle.X_train,
-        bundle.y_train,
-        bundle.X_val,
-        bundle.y_val,
-        train_block_ids=bundle.meta["train_block"],
-        val_block_ids=bundle.meta["val_block"],
-    )
-
-    probabilities = model.predict_proba(
-        bundle.X_test,
-        block_ids=bundle.meta["test_block"],
-    )
-
-    predictions = model.predict(
-        bundle.X_test,
-        block_ids=bundle.meta["test_block"],
-    )
-
-    drift = model.detect_drift(
-        bundle.X_test,
-        block_ids=bundle.meta["test_block"],
-    )
+This model NEVER creates train/validation/test splits. The caller must provide
+the frozen Data4Cyber splits. Block identifiers can be supplied so temporal
+windows never combine rows from different contiguous blocks.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+import warnings
 
 import numpy as np
+from scipy.stats import kendalltau
+from sklearn.metrics import f1_score
 
-from src.saurabh.correlation_graph import CorrelationBehaviouralGraph
-from src.saurabh.dynamic_threshold import DynamicAdaptiveThreshold
-from src.saurabh.shap_drift import SHAPDriftDetector
 
+# =====================================================================
+# MODULE A — CORRELATION BEHAVIOURAL GRAPH
+# =====================================================================
+
+class CorrelationBehaviouralGraph:
+    """
+    Static correlation behavioural graph.
+
+    Workflow:
+        1. Fit a Pearson correlation baseline using benign training samples.
+        2. Compute a correlation matrix for each incoming window.
+        3. Measure divergence from the baseline using Frobenius norm.
+        4. Assign the resulting graph_frob_div score to every row in the
+           corresponding window.
+
+    Parameters
+    ----------
+    window_size : int, default=500
+        Number of samples used to construct each correlation window.
+        Project default is 500.
+
+    Notes
+    -----
+    When block_ids are supplied to transform(), windows are constructed
+    independently inside each contiguous block. This is required by the
+    project-standard split policy because split rows may originate from blocks
+    separated by large gaps in time.
+    """
+
+    def __init__(self, window_size: int = 500):
+        if window_size < 2:
+            raise ValueError("window_size must be at least 2")
+
+        self.window_size = window_size
+        self.baseline_correlation_: np.ndarray | None = None
+        self.n_features_: int | None = None
+
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray | None = None,
+    ) -> "CorrelationBehaviouralGraph":
+        """
+        Fit the static baseline correlation matrix.
+
+        If labels are supplied, only benign samples (label == 0) are used.
+        If labels are omitted, all supplied samples are treated as benign.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Feature matrix of shape (n_samples, n_features).
+
+        y : np.ndarray | None
+            Binary labels where:
+                0 = benign
+                1 = attack
+
+        Returns
+        -------
+        CorrelationBehaviouralGraph
+            Fitted instance.
+        """
+
+        X = self._validate_X(X)
+
+        if y is not None:
+            y = np.asarray(y).reshape(-1)
+
+            if len(y) != len(X):
+                raise ValueError(
+                    "X and y must contain the same number of samples"
+                )
+
+            benign_mask = y == 0
+            X_baseline = X[benign_mask]
+
+            if len(X_baseline) < 2:
+                raise ValueError(
+                    "At least two benign samples are required "
+                    "to construct the correlation baseline"
+                )
+        else:
+            X_baseline = X
+
+        self.baseline_correlation_ = self._correlation_matrix(X_baseline)
+        self.n_features_ = X.shape[1]
+
+        return self
+
+    def divergence(self, X_window: np.ndarray) -> float:
+        """
+        Calculate Frobenius divergence between a window correlation matrix
+        and the fitted benign baseline.
+
+        Parameters
+        ----------
+        X_window : np.ndarray
+            Window of shape (n_samples, n_features).
+
+        Returns
+        -------
+        float
+            Frobenius norm divergence score.
+        """
+
+        self._check_fitted()
+
+        X_window = self._validate_X(X_window)
+
+        if X_window.shape[1] != self.n_features_:
+            raise ValueError(
+                f"Expected {self.n_features_} features, "
+                f"received {X_window.shape[1]}"
+            )
+
+        if len(X_window) < 2:
+            raise ValueError(
+                "At least two samples are required "
+                "to calculate a correlation matrix"
+            )
+
+        window_correlation = self._correlation_matrix(X_window)
+
+        return float(
+            np.linalg.norm(
+                window_correlation - self.baseline_correlation_,
+                ord="fro",
+            )
+        )
+
+    def transform(
+        self,
+        X: np.ndarray,
+        block_ids: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Compute graph_frob_div and append it as one additional feature.
+
+        Windows are fixed and non-overlapping.
+
+        Without block_ids:
+            The entire input is treated as one continuous sequence.
+
+        With block_ids:
+            Each block is processed independently. Windows never cross block
+            boundaries. This is required for project-standard evaluation.
+
+        Each row inside the same window receives the same divergence score.
+
+        A final partial window is evaluated if it contains at least two rows.
+        A one-row remainder reuses the previous score within that block.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Feature matrix of shape (n_samples, n_features).
+
+        block_ids : np.ndarray | None
+            Block identifier for each row.
+
+            Must have length n_samples. Rows belonging to different blocks are
+            never placed in the same correlation window.
+
+        Returns
+        -------
+        np.ndarray
+            Matrix of shape (n_samples, n_features + 1), where the final
+            column is graph_frob_div.
+        """
+
+        self._check_fitted()
+
+        X = self._validate_X(X)
+
+        if X.shape[1] != self.n_features_:
+            raise ValueError(
+                f"Expected {self.n_features_} features, "
+                f"received {X.shape[1]}"
+            )
+
+        n_samples = len(X)
+        scores = np.zeros(n_samples, dtype=np.float64)
+
+        # Backwards-compatible behaviour:
+        # treat the entire input as one continuous block.
+        if block_ids is None:
+            self._transform_block(X, scores, np.arange(n_samples))
+        else:
+            block_ids = np.asarray(block_ids).reshape(-1)
+
+            if len(block_ids) != n_samples:
+                raise ValueError(
+                    "block_ids must contain one identifier per sample: "
+                    f"expected {n_samples}, received {len(block_ids)}"
+                )
+
+            # np.unique returns deterministic block order.
+            # DataBundle rows are already ordered by block and then time.
+            for block_id in np.unique(block_ids):
+                rows = np.flatnonzero(block_ids == block_id)
+
+                self._transform_block(X, scores, rows)
+
+        return np.column_stack((X, scores))
+
+    def fit_transform(
+        self,
+        X: np.ndarray,
+        y: np.ndarray | None = None,
+        block_ids: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Fit the benign correlation baseline and transform X.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Feature matrix.
+
+        y : np.ndarray | None
+            Binary labels used to select benign baseline samples.
+
+        block_ids : np.ndarray | None
+            Optional block identifier per row. When supplied, windows remain
+            inside their respective blocks.
+        """
+
+        return self.fit(X, y).transform(X, block_ids=block_ids)
+
+    def _transform_block(
+        self,
+        X: np.ndarray,
+        scores: np.ndarray,
+        rows: np.ndarray,
+    ) -> None:
+        """
+        Compute divergence scores for one contiguous block.
+
+        Windows are non-overlapping and never extend beyond `rows`.
+
+        Blocks shorter than two rows cannot form a Pearson correlation matrix,
+        so their score is left as zero.
+        """
+
+        n_rows = len(rows)
+
+        if n_rows == 0:
+            return
+
+        previous_score = 0.0
+
+        for start in range(0, n_rows, self.window_size):
+            end = min(start + self.window_size, n_rows)
+
+            window_rows = rows[start:end]
+            window = X[window_rows]
+
+            if len(window) >= 2:
+                score = self.divergence(window)
+                previous_score = score
+            else:
+                # A single row cannot form a Pearson correlation matrix.
+                # Reuse the previous window's score within THIS block only.
+                score = previous_score
+
+            scores[window_rows] = score
+
+    @staticmethod
+    def _validate_X(X: np.ndarray) -> np.ndarray:
+        """
+        Validate and convert input to a 2D floating-point array.
+        """
+
+        X = np.asarray(X, dtype=np.float64)
+
+        if X.ndim != 2:
+            raise ValueError(
+                "X must be a 2D array of shape "
+                "(n_samples, n_features)"
+            )
+
+        if len(X) < 2:
+            raise ValueError(
+                "At least two samples are required"
+            )
+
+        if not np.isfinite(X).all():
+            raise ValueError(
+                "X contains NaN or infinite values"
+            )
+
+        return X
+
+    @staticmethod
+    def _correlation_matrix(X: np.ndarray) -> np.ndarray:
+        """
+        Calculate a stable Pearson correlation matrix.
+
+        Constant columns have undefined Pearson correlations and NumPy emits
+        RuntimeWarnings / NaNs for them.
+
+        Undefined correlations are replaced with zero, while every diagonal
+        entry is explicitly set to one.
+        """
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+
+            correlation = np.corrcoef(
+                X,
+                rowvar=False,
+            )
+
+        correlation = np.nan_to_num(
+            correlation,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+
+        np.fill_diagonal(correlation, 1.0)
+
+        return correlation
+
+    def _check_fitted(self) -> None:
+        """
+        Raise an error if fit() has not been called.
+        """
+
+        if self.baseline_correlation_ is None:
+            raise RuntimeError(
+                "CorrelationBehaviouralGraph is not fitted. "
+                "Call fit() before transform() or divergence()."
+            )
+
+
+# =====================================================================
+# MODULE B — DYNAMIC ADAPTIVE THRESHOLD
+# =====================================================================
+
+class DynamicAdaptiveThreshold:
+    """
+    Dynamic adaptive classification threshold.
+
+    A global F1-optimal threshold is first learned from the complete
+    validation set. Per-window thresholds are then learned only for
+    validation windows containing both classes.
+
+    Windows containing only one class fall back to the global threshold.
+    This prevents degenerate thresholds such as 0.0 from being selected
+    simply because predicting every sample as positive maximizes F1 in
+    an all-positive or class-missing window.
+    """
+
+    def __init__(
+        self,
+        window_size: int = 500,
+        threshold_min: float = 0.01,
+        threshold_max: float = 0.99,
+        threshold_step: float = 0.01,
+    ) -> None:
+        if window_size < 1:
+            raise ValueError(
+                "window_size must be at least 1"
+            )
+
+        if not 0.0 <= threshold_min <= 1.0:
+            raise ValueError(
+                "threshold_min must be between 0 and 1"
+            )
+
+        if not 0.0 <= threshold_max <= 1.0:
+            raise ValueError(
+                "threshold_max must be between 0 and 1"
+            )
+
+        if threshold_min >= threshold_max:
+            raise ValueError(
+                "threshold_min must be smaller than threshold_max"
+            )
+
+        if threshold_step <= 0:
+            raise ValueError(
+                "threshold_step must be positive"
+            )
+
+        self.window_size = window_size
+        self.threshold_min = threshold_min
+        self.threshold_max = threshold_max
+        self.threshold_step = threshold_step
+
+        self.thresholds_: np.ndarray | None = None
+        self.window_f1_: np.ndarray | None = None
+        self.global_threshold_: float | None = None
+        self.global_f1_: float | None = None
+
+    # ------------------------------------------------------------------
+    # Threshold search
+    # ------------------------------------------------------------------
+
+    def _candidate_thresholds(self) -> np.ndarray:
+        """Return valid threshold candidates."""
+
+        return np.arange(
+            self.threshold_min,
+            self.threshold_max + self.threshold_step / 2,
+            self.threshold_step,
+        )
+
+    def find_optimal_threshold(
+        self,
+        y_true: np.ndarray,
+        y_score: np.ndarray,
+    ) -> tuple[float, float]:
+        """
+        Find the threshold maximizing attack-class F1.
+
+        Tie-breaking prefers the threshold closest to 0.5, which avoids
+        systematically selecting extreme thresholds when several thresholds
+        produce identical F1 scores.
+        """
+
+        y_true, y_score = self._validate_inputs(
+            y_true,
+            y_score,
+        )
+
+        candidates = self._candidate_thresholds()
+
+        best_threshold = 0.5
+        best_f1 = -1.0
+
+        for threshold in candidates:
+            y_pred = (
+                y_score >= threshold
+            ).astype(np.int64)
+
+            score = f1_score(
+                y_true,
+                y_pred,
+                pos_label=1,
+                zero_division=0,
+            )
+
+            if score > best_f1:
+                best_f1 = float(score)
+                best_threshold = float(threshold)
+
+            elif np.isclose(score, best_f1):
+                current_distance = abs(
+                    float(threshold) - 0.5
+                )
+
+                best_distance = abs(
+                    best_threshold - 0.5
+                )
+
+                if current_distance < best_distance:
+                    best_threshold = float(threshold)
+
+        return best_threshold, best_f1
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+
+    def fit(
+        self,
+        y_true: np.ndarray,
+        y_score: np.ndarray,
+        block_ids: np.ndarray | None = None,
+    ) -> "DynamicAdaptiveThreshold":
+        """
+        Learn thresholds using validation data only.
+
+        Strategy:
+        1. Learn one global validation threshold.
+        2. Learn per-window thresholds where both classes are present.
+        3. Use the global threshold as fallback for one-class windows.
+        """
+
+        y_true, y_score = self._validate_inputs(
+            y_true,
+            y_score,
+        )
+
+        # --------------------------------------------------------------
+        # Global fallback threshold
+        # --------------------------------------------------------------
+
+        (
+            self.global_threshold_,
+            self.global_f1_,
+        ) = self.find_optimal_threshold(
+            y_true,
+            y_score,
+        )
+
+        # --------------------------------------------------------------
+        # Construct groups
+        # --------------------------------------------------------------
+
+        if block_ids is None:
+            groups = [
+                (
+                    y_true,
+                    y_score,
+                )
+            ]
+        else:
+            block_ids = np.asarray(
+                block_ids
+            ).reshape(-1)
+
+            if len(block_ids) != len(y_true):
+                raise ValueError(
+                    "block_ids must contain one value "
+                    "per sample"
+                )
+
+            groups = []
+
+            for block in np.unique(block_ids):
+                rows = np.flatnonzero(
+                    block_ids == block
+                )
+
+                groups.append(
+                    (
+                        y_true[rows],
+                        y_score[rows],
+                    )
+                )
+
+        thresholds: list[float] = []
+        f1_scores: list[float] = []
+
+        # --------------------------------------------------------------
+        # Learn window thresholds
+        # --------------------------------------------------------------
+
+        for group_y, group_score in groups:
+            n_samples = len(group_y)
+
+            for start in range(
+                0,
+                n_samples,
+                self.window_size,
+            ):
+                end = min(
+                    start + self.window_size,
+                    n_samples,
+                )
+
+                window_y = group_y[start:end]
+                window_score = group_score[start:end]
+
+                if len(window_y) == 0:
+                    continue
+
+                # ------------------------------------------------------
+                # Only optimize locally when both classes exist.
+                #
+                # One-class windows produce unstable F1 thresholds.
+                # Use the globally learned validation threshold instead.
+                # ------------------------------------------------------
+
+                unique_classes = np.unique(window_y)
+
+                if len(unique_classes) < 2:
+                    threshold = self.global_threshold_
+                    score = f1_score(
+                        window_y,
+                        (
+                            window_score >= threshold
+                        ).astype(np.int64),
+                        pos_label=1,
+                        zero_division=0,
+                    )
+                else:
+                    threshold, score = (
+                        self.find_optimal_threshold(
+                            window_y,
+                            window_score,
+                        )
+                    )
+
+                thresholds.append(
+                    float(threshold)
+                )
+
+                f1_scores.append(
+                    float(score)
+                )
+
+        # Safety fallback.
+        if not thresholds:
+            thresholds = [
+                float(self.global_threshold_)
+            ]
+
+            f1_scores = [
+                float(self.global_f1_)
+            ]
+
+        self.thresholds_ = np.asarray(
+            thresholds,
+            dtype=np.float64,
+        )
+
+        self.window_f1_ = np.asarray(
+            f1_scores,
+            dtype=np.float64,
+        )
+
+        return self
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
+
+    def predict(
+        self,
+        y_score: np.ndarray,
+        block_ids: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Apply validation-learned thresholds to new probabilities.
+
+        Thresholds are mapped cyclically across prediction windows.
+        No prediction labels are used.
+        """
+
+        self._check_fitted()
+
+        y_score = np.asarray(
+            y_score,
+            dtype=np.float64,
+        ).reshape(-1)
+
+        if len(y_score) == 0:
+            raise ValueError(
+                "y_score must contain at least one sample"
+            )
+
+        if not np.isfinite(y_score).all():
+            raise ValueError(
+                "y_score contains NaN or infinite values"
+            )
+
+        if (
+            np.any(y_score < 0.0)
+            or np.any(y_score > 1.0)
+        ):
+            raise ValueError(
+                "y_score must contain probabilities "
+                "between 0 and 1"
+            )
+
+        predictions = np.zeros(
+            len(y_score),
+            dtype=np.int64,
+        )
+
+        # --------------------------------------------------------------
+        # Build prediction groups
+        # --------------------------------------------------------------
+
+        if block_ids is None:
+            groups = [
+                np.arange(len(y_score))
+            ]
+        else:
+            block_ids = np.asarray(
+                block_ids
+            ).reshape(-1)
+
+            if len(block_ids) != len(y_score):
+                raise ValueError(
+                    "block_ids must contain one value "
+                    "per sample"
+                )
+
+            groups = [
+                np.flatnonzero(
+                    block_ids == block
+                )
+                for block in np.unique(block_ids)
+            ]
+
+        threshold_index = 0
+
+        # --------------------------------------------------------------
+        # Apply thresholds window by window
+        # --------------------------------------------------------------
+
+        for rows in groups:
+            n_samples = len(rows)
+
+            for start in range(
+                0,
+                n_samples,
+                self.window_size,
+            ):
+                end = min(
+                    start + self.window_size,
+                    n_samples,
+                )
+
+                window_rows = rows[start:end]
+
+                threshold = self.thresholds_[
+                    threshold_index
+                    % len(self.thresholds_)
+                ]
+
+                predictions[window_rows] = (
+                    y_score[window_rows] >= threshold
+                ).astype(np.int64)
+
+                threshold_index += 1
+
+        return predictions
+
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
+
+    def threshold_statistics(self) -> dict[str, float]:
+        """
+        Return summary statistics for learned thresholds.
+        """
+
+        self._check_fitted()
+
+        return {
+            "min": float(
+                self.thresholds_.min()
+            ),
+            "mean": float(
+                self.thresholds_.mean()
+            ),
+            "max": float(
+                self.thresholds_.max()
+            ),
+            "std": float(
+                self.thresholds_.std()
+            ),
+            "n_windows": int(
+                len(self.thresholds_)
+            ),
+            "global_threshold": float(
+                self.global_threshold_
+            ),
+            "global_f1": float(
+                self.global_f1_
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_inputs(
+        y_true: np.ndarray,
+        y_score: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Validate binary labels and probability scores."""
+
+        y_true = np.asarray(
+            y_true,
+            dtype=np.int64,
+        ).reshape(-1)
+
+        y_score = np.asarray(
+            y_score,
+            dtype=np.float64,
+        ).reshape(-1)
+
+        if len(y_true) != len(y_score):
+            raise ValueError(
+                "y_true and y_score must contain "
+                "the same number of samples"
+            )
+
+        if len(y_true) == 0:
+            raise ValueError(
+                "At least one sample is required"
+            )
+
+        if not np.isin(
+            y_true,
+            [0, 1],
+        ).all():
+            raise ValueError(
+                "y_true must contain binary labels "
+                "0 and 1"
+            )
+
+        if not np.isfinite(y_score).all():
+            raise ValueError(
+                "y_score contains NaN or infinite values"
+            )
+
+        if (
+            np.any(y_score < 0.0)
+            or np.any(y_score > 1.0)
+        ):
+            raise ValueError(
+                "y_score must contain probabilities "
+                "between 0 and 1"
+            )
+
+        return y_true, y_score
+
+    def _check_fitted(self) -> None:
+        """Raise an error when called before fit."""
+
+        if (
+            self.thresholds_ is None
+            or self.global_threshold_ is None
+        ):
+            raise RuntimeError(
+                "DynamicAdaptiveThreshold is not fitted. "
+                "Call fit() before predict() or "
+                "threshold_statistics()."
+            )
+
+
+# =====================================================================
+# MODULE C — SHAP DRIFT DETECTION
+# =====================================================================
+
+@dataclass
+class SHAPDriftResult:
+    """Results produced by SHAP drift analysis."""
+
+    tau: np.ndarray
+    drift: np.ndarray
+    n_windows: int
+
+@dataclass
+class SHAPDriftDetector:
+    """
+    SHAP feature-importance ranking drift detector.
+
+    Parameters
+    ----------
+    window_size : int
+        Number of samples per SHAP analysis window.
+        Project default is 1000.
+    background_size : int
+        Maximum number of training rows used to establish the SHAP reference.
+    sample_size : int
+        Maximum number of rows sampled from each evaluation window.
+        SHAP values are expensive, so sampling keeps Module C practical.
+    drift_threshold : float
+        A window is flagged as drifted when Kendall tau is below this value.
+    seed : int
+        Random seed used for deterministic sampling.
+    """
+
+    window_size: int = 1000
+    background_size: int = 1000
+    sample_size: int = 500
+    drift_threshold: float = 0.7
+    seed: int = 42
+
+    def __post_init__(self) -> None:
+        if self.window_size < 1:
+            raise ValueError("window_size must be at least 1")
+
+        if self.background_size < 1:
+            raise ValueError("background_size must be at least 1")
+
+        if self.sample_size < 1:
+            raise ValueError("sample_size must be at least 1")
+
+        if not -1.0 <= self.drift_threshold <= 1.0:
+            raise ValueError(
+                "drift_threshold must be between -1 and 1"
+            )
+
+        self.reference_importance_: np.ndarray | None = None
+        self.reference_ranking_: np.ndarray | None = None
+        self.n_features_: int | None = None
+        self._explainer: Any = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def fit(
+        self,
+        model: Any,
+        X_reference: np.ndarray,
+    ) -> "SHAPDriftDetector":
+        """
+        Build the reference SHAP importance ranking.
+
+        Under the project-standard policy, X_reference must come from
+        TRAINING rows only.
+
+        Parameters
+        ----------
+        model
+            Fitted tree-based model compatible with shap.TreeExplainer.
+        X_reference
+            Training/reference feature matrix.
+
+        Returns
+        -------
+        self
+        """
+
+        X_reference = self._validate_X(X_reference)
+
+        self.n_features_ = X_reference.shape[1]
+
+        rng = np.random.default_rng(self.seed)
+
+        X_sample = self._sample_rows(
+            X_reference,
+            self.background_size,
+            rng,
+        )
+
+        import shap
+
+        self._explainer = shap.TreeExplainer(model)
+
+        shap_values = self._compute_shap_values(X_sample)
+
+        importance = np.mean(
+            np.abs(shap_values),
+            axis=0,
+        )
+
+        self.reference_importance_ = np.asarray(
+            importance,
+            dtype=np.float64,
+        )
+
+        self.reference_ranking_ = self._importance_to_ranking(
+            self.reference_importance_
+        )
+
+        return self
+
+    def transform(
+        self,
+        X: np.ndarray,
+        block_ids: np.ndarray | None = None,
+    ) -> SHAPDriftResult:
+        """
+        Compute SHAP drift scores for complete windows.
+
+        Parameters
+        ----------
+        X
+            Evaluation feature matrix.
+        block_ids
+            Optional contiguous block identifier per row.
+
+            When supplied, windows restart at every block boundary and
+            therefore never combine discontinuous time periods.
+
+        Returns
+        -------
+        SHAPDriftResult
+            tau:
+                Kendall tau for every complete window.
+            drift:
+                Boolean drift flag for every window.
+            n_windows:
+                Number of complete windows analysed.
+        """
+
+        self._check_fitted()
+
+        X = self._validate_X(X)
+
+        if X.shape[1] != self.n_features_:
+            raise ValueError(
+                "X has a different number of features than "
+                "the fitted reference data"
+            )
+
+        groups = self._make_groups(
+            X,
+            block_ids,
+        )
+
+        rng = np.random.default_rng(self.seed)
+
+        tau_scores: list[float] = []
+
+        for rows in groups:
+            n_rows = len(rows)
+
+            for start in range(
+                0,
+                n_rows - self.window_size + 1,
+                self.window_size,
+            ):
+                window_rows = rows[
+                    start:start + self.window_size
+                ]
+
+                X_window = X[window_rows]
+
+                X_sample = self._sample_rows(
+                    X_window,
+                    self.sample_size,
+                    rng,
+                )
+
+                shap_values = self._compute_shap_values(
+                    X_sample
+                )
+
+                importance = np.mean(
+                    np.abs(shap_values),
+                    axis=0,
+                )
+
+                ranking = self._importance_to_ranking(
+                    importance
+                )
+
+                tau = kendalltau(
+                    self.reference_ranking_,
+                    ranking,
+                ).statistic
+
+                # Kendall tau can become NaN when rankings are degenerate.
+                # Treat identical constant rankings as no measurable drift.
+                if not np.isfinite(tau):
+                    tau = 1.0
+
+                tau_scores.append(float(tau))
+
+        tau_array = np.asarray(
+            tau_scores,
+            dtype=np.float64,
+        )
+
+        drift_array = (
+            tau_array < self.drift_threshold
+        )
+
+        return SHAPDriftResult(
+            tau=tau_array,
+            drift=drift_array,
+            n_windows=len(tau_array),
+        )
+
+    def fit_transform(
+        self,
+        model: Any,
+        X_reference: np.ndarray,
+        X: np.ndarray,
+        block_ids: np.ndarray | None = None,
+    ) -> SHAPDriftResult:
+        """Fit the reference ranking and analyse evaluation windows."""
+
+        return self.fit(
+            model,
+            X_reference,
+        ).transform(
+            X,
+            block_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_X(
+        X: np.ndarray,
+    ) -> np.ndarray:
+        """Validate a numeric feature matrix."""
+
+        X = np.asarray(
+            X,
+            dtype=np.float64,
+        )
+
+        if X.ndim != 2:
+            raise ValueError(
+                "X must be a 2-dimensional feature matrix"
+            )
+
+        if len(X) == 0:
+            raise ValueError(
+                "X must contain at least one sample"
+            )
+
+        if X.shape[1] == 0:
+            raise ValueError(
+                "X must contain at least one feature"
+            )
+
+        if not np.isfinite(X).all():
+            raise ValueError(
+                "X contains NaN or infinite values"
+            )
+
+        return X
+
+    @staticmethod
+    def _sample_rows(
+        X: np.ndarray,
+        max_rows: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """
+        Deterministically sample rows without replacement.
+
+        If X already contains fewer rows than max_rows, all rows are used.
+        """
+
+        if len(X) <= max_rows:
+            return X
+
+        indices = rng.choice(
+            len(X),
+            size=max_rows,
+            replace=False,
+        )
+
+        return X[indices]
+
+    @staticmethod
+    def _importance_to_ranking(
+        importance: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Convert feature importance values into rank positions.
+
+        Highest importance receives rank 0.
+
+        Stable sorting makes ties deterministic.
+        """
+
+        order = np.argsort(
+            -importance,
+            kind="stable",
+        )
+
+        ranking = np.empty(
+            len(importance),
+            dtype=np.int64,
+        )
+
+        ranking[order] = np.arange(
+            len(importance)
+        )
+
+        return ranking
+
+    @staticmethod
+    def _make_groups(
+        X: np.ndarray,
+        block_ids: np.ndarray | None,
+    ) -> list[np.ndarray]:
+        """
+        Construct row groups for windowing.
+
+        Without block IDs the whole matrix is one group.
+        With block IDs each block is an independent group.
+        """
+
+        if block_ids is None:
+            return [
+                np.arange(
+                    len(X),
+                    dtype=np.int64,
+                )
+            ]
+
+        block_ids = np.asarray(
+            block_ids
+        ).reshape(-1)
+
+        if len(block_ids) != len(X):
+            raise ValueError(
+                "block_ids must contain one value per X row"
+            )
+
+        return [
+            np.flatnonzero(
+                block_ids == block
+            )
+            for block in np.unique(block_ids)
+        ]
+
+    def _compute_shap_values(
+        self,
+        X: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Compute SHAP values and normalize output shape.
+
+        Different SHAP/XGBoost versions may return:
+        * (samples, features)
+        * (samples, features, classes)
+        """
+
+        values = self._explainer.shap_values(X)
+
+        values = np.asarray(
+            values,
+            dtype=np.float64,
+        )
+
+        if values.ndim == 3:
+            # Binary classification can expose a class axis.
+            # Use the attack/positive class when available.
+            if values.shape[2] > 1:
+                values = values[:, :, 1]
+            else:
+                values = values[:, :, 0]
+
+        if values.ndim != 2:
+            raise RuntimeError(
+                "Unexpected SHAP output shape: "
+                f"{values.shape}"
+            )
+
+        return values
+
+    def _check_fitted(self) -> None:
+        """Raise an error when transform() is called before fit()."""
+
+        if (
+            self._explainer is None
+            or self.reference_importance_ is None
+            or self.reference_ranking_ is None
+        ):
+            raise RuntimeError(
+                "SHAPDriftDetector is not fitted. "
+                "Call fit() before transform()."
+            )
+
+
+# =====================================================================
+# INTEGRATED XGBOOST PIPELINE
+# =====================================================================
 
 # ---------------------------------------------------------------------
 # XGBoost configuration
