@@ -6,15 +6,17 @@ Section IV.D. There is no public implementation of that paper; this is
 reconstructed from the paper text, its Table II feature list, and the public
 NCSRD-DS-5GDDoS dataset.
 
-This is the `base_paper` lineage and it uses the **base38** feature set only.
-It must never be mixed with the `saurabh49` feature set — see
-docs/PROJECT_DECISIONS.md, D1.
+This is the `base_paper` lineage. On NCSRD it uses the **base38** feature set
+and must never be mixed with `saurabh49` (docs/PROJECT_DECISIONS.md, D1). The
+same methodology is reused on Data4Cyber via
+`experiments/data4cyber/run_base.py`, with that dataset's own electrical
+telemetry -- the model and protocol transfer, the feature schema does not (D7).
 
 What the paper specifies (IV.D), and what we do:
 
 | Paper | Here |
 |---|---|
-| 38 features | `base38` from `ncsrd_prep` |
+| 38 features | `base38` from `ncsrd_prep` (Data4Cyber: its own 140 columns) |
 | imputation, label encoding, StandardScaler | done in `ncsrd_prep` |
 | "custom undersampling strategy, reducing the majority class while retaining all minority class samples" | `undersample_majority()`, ratio selected on validation |
 | "scale_pos_weight tuned to emphasize the minority class" | derived from the post-resampling counts |
@@ -69,16 +71,25 @@ def undersample_majority(X: np.ndarray, y: np.ndarray, ratio: float,
                          seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Random undersampling that keeps **every** minority sample.
 
+    The base paper's rule is "reduce the majority class while retaining all
+    minority class samples", so which class gets thinned is decided by the data,
+    not hard-coded. On NCSRD benign is the majority (6.28 % attack); on
+    Data4Cyber the *attack* class is the majority (~61 %), and the rule then
+    thins attacks instead.
+
     `ratio` is majority:minority after resampling, so `ratio=1.0` gives a
-    balanced set. If the majority class is already scarcer than the request,
-    it is left untouched. Row order is shuffled so XGBoost's subsampling does
-    not see a block-ordered set.
+    balanced set. If the majority class is already scarcer than the request it
+    is left untouched. Row order is shuffled so XGBoost's subsampling does not
+    see a class-ordered set.
     """
     rng = np.random.default_rng(seed)
     pos = np.flatnonzero(y == 1)
     neg = np.flatnonzero(y == 0)
-    n_keep = min(len(neg), int(round(len(pos) * ratio)))
-    keep = np.concatenate([pos, rng.choice(neg, size=n_keep, replace=False)])
+    # Order of the rng calls below is identical in both branches, so the
+    # benign-majority case reproduces earlier NCSRD runs exactly.
+    minority, majority = (pos, neg) if len(neg) >= len(pos) else (neg, pos)
+    n_keep = min(len(majority), int(round(len(minority) * ratio)))
+    keep = np.concatenate([minority, rng.choice(majority, size=n_keep, replace=False)])
     rng.shuffle(keep)
     return X[keep], y[keep]
 
