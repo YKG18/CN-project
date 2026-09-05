@@ -1,50 +1,70 @@
 """
-Saurabh Methodology - Integrated XGBoost Pipeline.
+Saurabh Methodology - Integrated XGBoost Pipeline for Data4Cyber.
 
-Combines the three proposed methodology modules:
+Combines three methodology modules with a leakage-safe evaluation policy.
 
 Module A - Correlation Behavioural Graph
-    Learns a benign correlation baseline from training data and adds one
-    correlation-divergence feature.
+    Learns a static benign Pearson-correlation baseline from TRAINING data
+    only and appends a graph_frob_div feature to each row.
 
 Module B - Dynamic Adaptive Threshold
-    Learns F1-optimal thresholds from validation probabilities only and applies
-    them to test probability windows without using test labels.
+    Learns classification thresholds from VALIDATION probabilities and labels
+    only. Test labels are never used for threshold selection.
 
 Module C - SHAP Drift Detection
-    Learns a reference SHAP feature-importance ranking from training data and
-    detects ranking drift on later windows.
+    Learns a reference SHAP feature-importance ranking from TRAINING data only
+    and detects ranking drift in later windows without using their labels.
 
 IMPORTANT SPLIT POLICY
 ----------------------
-This model NEVER creates its own train/test split. The caller must load the
-project-standard frozen split through NetworkDataAdapter.load_split().
+This model NEVER creates train/validation/test splits.
 
-Expected workflow:
+The caller must use the frozen Data4Cyber splits produced by:
 
-    adapter = NetworkDataAdapter.for_feature_set("saurabh49")
-    adapter.load_split(config.SPLIT_INDEX_FILE)
+    common/data/data4cyber/_prep.py
 
+For the primary experiment:
+
+    adapter = Data4CyberAdapter(split_mode="block")
+    bundle = adapter.for_xgboost(balance="class_weight")
+
+Block identifiers stored in bundle.meta are passed to all methodology modules
+that construct temporal windows. This guarantees that windows never combine
+rows from different contiguous blocks.
+
+Typical workflow
+----------------
+
+    from common.data.data4cyber_adapter import Data4CyberAdapter
+    from saurabh.saurabh_xgboost import SaurabhXGBoost
+
+    adapter = Data4CyberAdapter(split_mode="block")
     bundle = adapter.for_xgboost(balance="class_weight")
 
     model = SaurabhXGBoost()
+
     model.fit(
         bundle.X_train,
         bundle.y_train,
         bundle.X_val,
         bundle.y_val,
-        train_block_ids=bundle.train_block,
-        val_block_ids=bundle.val_block,
+        train_block_ids=bundle.meta["train_block"],
+        val_block_ids=bundle.meta["val_block"],
     )
 
     probabilities = model.predict_proba(
         bundle.X_test,
-        block_ids=bundle.test_block,
+        block_ids=bundle.meta["test_block"],
     )
 
     predictions = model.predict(
         bundle.X_test,
-        block_ids=bundle.test_block,
+        block_ids=bundle.meta["test_block"],
+    )
+
+    drift = model.detect_drift(
+        bundle.X_test,
+        block_ids=bundle.meta["test_block"],
     )
 """
 
@@ -77,23 +97,34 @@ SAURABH_XGBOOST_PARAMS: dict[str, Any] = {
 }
 
 
-def scale_pos_weight_of(y: np.ndarray) -> float:
+def scale_pos_weight_of(
+    y: np.ndarray,
+) -> float:
     """
     Calculate negative / positive class ratio.
 
-    Used to compensate for attack-class imbalance without resampling
-    validation or test data.
+    Used to compensate for attack-class imbalance without random temporal
+    oversampling, preserving the original ordering of rows inside blocks.
     """
 
-    y = np.asarray(y)
+    y = np.asarray(
+        y,
+        dtype=np.int64,
+    ).reshape(-1)
 
-    positives = int((y == 1).sum())
-    negatives = int((y == 0).sum())
+    positives = int(
+        (y == 1).sum()
+    )
+    negatives = int(
+        (y == 0).sum()
+    )
 
     if positives == 0:
         return 1.0
 
-    return float(negatives / positives)
+    return float(
+        negatives / positives
+    )
 
 
 @dataclass
@@ -108,61 +139,77 @@ class SaurabhXGBoost:
         X_train
            |
            v
-        CorrelationBehaviouralGraph.fit()
+        Module A: benign correlation baseline
            |
            v
-        transform(X_train)
+        graph_frob_div appended
            |
            v
-        XGBoost.fit()
+        XGBoost training
+           |
+           +----> Module C: SHAP reference ranking
+
 
     VALIDATION
         X_val
            |
            v
-        CorrelationBehaviouralGraph.transform()
+        Module A transform
            |
            v
         XGBoost probabilities
            |
            v
-        DynamicAdaptiveThreshold.fit()
+        Module B: validation threshold learning
+
 
     TEST
         X_test
            |
            v
-        CorrelationBehaviouralGraph.transform()
+        Module A transform
            |
            v
         XGBoost probabilities
            |
-           +----> DynamicAdaptiveThreshold.predict()
+           +----> Module B: validation-learned thresholds
            |
-           +----> SHAPDriftDetector.transform()
+           +----> Module C: SHAP ranking drift analysis
 
     Parameters
     ----------
     correlation_window_size:
-        Window size used by Module A.
+        Number of contiguous rows used for each correlation window.
 
     threshold_window_size:
-        Window size used by Module B.
+        Number of contiguous rows used for each dynamic threshold window.
 
     shap_window_size:
-        Window size used by Module C.
+        Number of contiguous rows used for each SHAP drift window.
 
     shap_background_size:
-        Maximum background rows used by SHAP.
+        Maximum number of training rows sampled for the SHAP reference.
 
     shap_sample_size:
-        Rows sampled when calculating window SHAP importance.
+        Maximum number of rows sampled per SHAP evaluation window.
+
+    shap_drift_threshold:
+        Kendall tau below which a SHAP window is flagged as drifted.
 
     seed:
         Random seed.
 
     early_stopping_rounds:
-        XGBoost early stopping patience.
+        XGBoost validation patience.
+
+    use_correlation_graph:
+        Enable Module A.
+
+    use_dynamic_threshold:
+        Enable Module B.
+
+    use_shap_drift:
+        Enable Module C.
     """
 
     correlation_window_size: int = 500
@@ -185,7 +232,9 @@ class SaurabhXGBoost:
     use_shap_drift: bool = True
 
     params: dict[str, Any] = field(
-        default_factory=lambda: dict(SAURABH_XGBOOST_PARAMS)
+        default_factory=lambda: dict(
+            SAURABH_XGBOOST_PARAMS
+        )
     )
 
     # -----------------------------------------------------------------
@@ -223,7 +272,9 @@ class SaurabhXGBoost:
         init=False,
     )
 
-    validation_threshold_statistics_: dict[str, float] | None = field(
+    validation_threshold_statistics_: (
+        dict[str, float] | None
+    ) = field(
         default=None,
         init=False,
     )
@@ -243,15 +294,25 @@ class SaurabhXGBoost:
         init=False,
     )
 
-    def __post_init__(self) -> None:
+    # -----------------------------------------------------------------
+    # Initialization
+    # -----------------------------------------------------------------
+
+    def __post_init__(
+        self,
+    ) -> None:
         """Initialize methodology modules."""
 
-        self.correlation_graph = CorrelationBehaviouralGraph(
-            window_size=self.correlation_window_size,
+        self.correlation_graph = (
+            CorrelationBehaviouralGraph(
+                window_size=self.correlation_window_size,
+            )
         )
 
-        self.dynamic_threshold = DynamicAdaptiveThreshold(
-            window_size=self.threshold_window_size,
+        self.dynamic_threshold = (
+            DynamicAdaptiveThreshold(
+                window_size=self.threshold_window_size,
+            )
         )
 
         self.shap_drift = SHAPDriftDetector(
@@ -278,29 +339,52 @@ class SaurabhXGBoost:
         """
         Fit the complete Saurabh methodology.
 
-        Critical leakage policy
-        -----------------------
-        * Correlation baseline is fitted ONLY on training data.
-        * XGBoost is trained ONLY on training data.
-        * Early stopping observes validation data.
-        * Dynamic thresholds are fitted ONLY on validation labels/probabilities.
-        * SHAP reference ranking is fitted ONLY on training data.
-
-        Test data is never used in fit().
+        Leakage policy
+        --------------
+        * Module A baseline uses benign TRAINING rows only.
+        * XGBoost trains on TRAINING rows only.
+        * Early stopping observes VALIDATION data.
+        * Module B learns thresholds from VALIDATION only.
+        * Module C reference ranking uses TRAINING rows only.
+        * TEST data is never used during fit().
         """
 
-        X_train = np.asarray(X_train, dtype=np.float64)
-        y_train = np.asarray(y_train, dtype=np.int64).reshape(-1)
+        X_train = np.asarray(
+            X_train,
+            dtype=np.float64,
+        )
 
-        X_val = np.asarray(X_val, dtype=np.float64)
-        y_val = np.asarray(y_val, dtype=np.int64).reshape(-1)
+        y_train = np.asarray(
+            y_train,
+            dtype=np.int64,
+        ).reshape(-1)
 
-        self._validate_xy(X_train, y_train, "training")
-        self._validate_xy(X_val, y_val, "validation")
+        X_val = np.asarray(
+            X_val,
+            dtype=np.float64,
+        )
+
+        y_val = np.asarray(
+            y_val,
+            dtype=np.int64,
+        ).reshape(-1)
+
+        self._validate_xy(
+            X_train,
+            y_train,
+            "training",
+        )
+
+        self._validate_xy(
+            X_val,
+            y_val,
+            "validation",
+        )
 
         if X_train.shape[1] != X_val.shape[1]:
             raise ValueError(
-                "Training and validation feature dimensions must match"
+                "Training and validation feature dimensions "
+                "must match"
             )
 
         self._validate_block_ids(
@@ -315,30 +399,39 @@ class SaurabhXGBoost:
             "val_block_ids",
         )
 
-        self.n_input_features_ = int(X_train.shape[1])
+        self.n_input_features_ = int(
+            X_train.shape[1]
+        )
 
         # -------------------------------------------------------------
-        # MODULE A — Correlation behavioural graph
+        # MODULE A — Correlation Behavioural Graph
         # -------------------------------------------------------------
 
         if self.use_correlation_graph:
-            # Fit benign correlation baseline ONLY on training data.
+
+            # Static baseline fitted from benign TRAINING rows only.
             self.correlation_graph.fit(
                 X_train,
                 y_train,
             )
 
-            X_train_model = self.correlation_graph.transform(
-                X_train,
-                block_ids=train_block_ids,
+            X_train_model = (
+                self.correlation_graph.transform(
+                    X_train,
+                    block_ids=train_block_ids,
+                )
             )
 
-            X_val_model = self.correlation_graph.transform(
-                X_val,
-                block_ids=val_block_ids,
+            X_val_model = (
+                self.correlation_graph.transform(
+                    X_val,
+                    block_ids=val_block_ids,
+                )
             )
+
         else:
-            # Ablation baseline: use the original feature space.
+
+            # Ablation: original feature space only.
             X_train_model = X_train
             X_val_model = X_val
 
@@ -352,14 +445,23 @@ class SaurabhXGBoost:
 
         import xgboost as xgb
 
-        self.scale_pos_weight_ = scale_pos_weight_of(
-            y_train
+        self.scale_pos_weight_ = (
+            scale_pos_weight_of(
+                y_train
+            )
         )
 
-        kwargs = dict(self.params)
+        kwargs = dict(
+            self.params
+        )
 
         kwargs["random_state"] = self.seed
-        kwargs["scale_pos_weight"] = self.scale_pos_weight_
+        kwargs["scale_pos_weight"] = (
+            self.scale_pos_weight_
+        )
+
+        # XGBoost versions differ slightly in where early stopping is
+        # configured. Constructor configuration works for modern versions.
         kwargs["early_stopping_rounds"] = (
             self.early_stopping_rounds
         )
@@ -372,24 +474,34 @@ class SaurabhXGBoost:
             X_train_model,
             y_train,
             eval_set=[
-                (X_val_model, y_val)
+                (
+                    X_val_model,
+                    y_val,
+                )
             ],
             verbose=False,
         )
 
-        self.best_iteration_ = getattr(
+        best_iteration = getattr(
             self.model,
             "best_iteration",
             None,
         )
 
+        self.best_iteration_ = (
+            int(best_iteration)
+            if best_iteration is not None
+            else None
+        )
+
         # -------------------------------------------------------------
-        # MODULE B — Dynamic adaptive threshold
+        # MODULE B — Dynamic Adaptive Threshold
         #
-        # Learn thresholds from VALIDATION ONLY.
+        # Validation probabilities + validation labels ONLY.
         # -------------------------------------------------------------
 
         if self.use_dynamic_threshold:
+
             p_val = self.model.predict_proba(
                 X_val_model
             )[:, 1]
@@ -403,16 +515,19 @@ class SaurabhXGBoost:
             self.validation_threshold_statistics_ = (
                 self.dynamic_threshold.threshold_statistics()
             )
+
         else:
+
             self.validation_threshold_statistics_ = None
 
         # -------------------------------------------------------------
-        # MODULE C — SHAP drift
+        # MODULE C — SHAP Drift Reference
         #
-        # Fit the training reference only when this module is enabled.
+        # Reference feature importance is computed from TRAINING data only.
         # -------------------------------------------------------------
 
         if self.use_shap_drift:
+
             self.shap_drift.fit(
                 self.model,
                 X_train_model,
@@ -423,27 +538,19 @@ class SaurabhXGBoost:
         return self
 
     # -----------------------------------------------------------------
-    # Probability prediction
+    # Feature transformation
     # -----------------------------------------------------------------
 
-    def predict_proba(
+    def transform_features(
         self,
         X: np.ndarray,
         block_ids: np.ndarray | None = None,
     ) -> np.ndarray:
         """
-        Return attack probabilities.
+        Transform raw features into the model feature space.
 
-        Module A is applied before XGBoost prediction.
-
-        Parameters
-        ----------
-        X:
-            Original 49-feature Saurabh input matrix.
-
-        block_ids:
-            Optional temporal block IDs. When supplied, correlation windows
-            restart at block boundaries.
+        This is the single shared transformation path used by probability
+        prediction and SHAP drift analysis.
         """
 
         self._check_fitted()
@@ -455,7 +562,7 @@ class SaurabhXGBoost:
 
         self._validate_x(
             X,
-            "prediction",
+            "input",
         )
 
         self._validate_block_ids(
@@ -464,19 +571,38 @@ class SaurabhXGBoost:
             "block_ids",
         )
 
-        # Apply Module A only when enabled.
         if self.use_correlation_graph:
-            X_model = self.correlation_graph.transform(
+
+            return self.correlation_graph.transform(
                 X,
                 block_ids=block_ids,
             )
-        else:
-            X_model = X
 
-        probabilities = self.model.predict_proba(
+        return X
+
+    # -----------------------------------------------------------------
+    # Probability prediction
+    # -----------------------------------------------------------------
+
+    def predict_proba(
+        self,
+        X: np.ndarray,
+        block_ids: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Return attack-class probabilities.
+
+        Module A is applied before XGBoost prediction.
+        """
+
+        X_model = self.transform_features(
+            X,
+            block_ids=block_ids,
+        )
+
+        return self.model.predict_proba(
             X_model
         )[:, 1]
-        return probabilities
 
     # -----------------------------------------------------------------
     # Final binary prediction
@@ -490,8 +616,7 @@ class SaurabhXGBoost:
         """
         Return binary attack predictions.
 
-        Probabilities come from XGBoost and decision thresholds come from
-        Module B, which was fitted on validation data only.
+        Module B uses thresholds learned from validation data only.
         """
 
         probabilities = self.predict_proba(
@@ -499,14 +624,17 @@ class SaurabhXGBoost:
             block_ids=block_ids,
         )
 
-        # Module B ablation: use the standard fixed threshold.
         if self.use_dynamic_threshold:
+
             return self.dynamic_threshold.predict(
                 probabilities,
                 block_ids=block_ids,
             )
 
-        return (probabilities >= 0.5).astype(np.int64)
+        return (
+            probabilities >= 0.5
+        ).astype(np.int64)
+
     # -----------------------------------------------------------------
     # SHAP drift analysis
     # -----------------------------------------------------------------
@@ -515,99 +643,55 @@ class SaurabhXGBoost:
         self,
         X: np.ndarray,
         block_ids: np.ndarray | None = None,
-    ):
+    ) -> SHAPDriftResult:
         """
-        Run Module C: SHAP-based feature importance drift detection.
+        Run Module C: SHAP feature-importance drift detection.
 
-        Parameters
-        ----------
-        X : np.ndarray
-            Raw saurabh49 input features.
-        block_ids : np.ndarray | None
-            Optional contiguous-time block identifiers. When supplied,
-            correlation windows are restarted at block boundaries before
-            constructing the graph feature.
+        No labels are used. This is safe for test-time or deployment-time
+        analysis.
 
-        Returns
-        -------
-        SHAPDriftResult
-            Window-level Kendall tau values and drift flags.
-
-        Notes
-        -----
-        No labels are used here. This method is safe for test-time or
-        deployment-time drift analysis.
+        Block IDs are passed through to SHAPDriftDetector so SHAP windows
+        never cross contiguous block boundaries.
         """
 
         self._check_fitted()
 
-        X = np.asarray(
-            X,
-            dtype=np.float64,
-        )
-
-        self._validate_x(
-            X,
-            "drift input",
-        )
-
-        if block_ids is not None:
-            block_ids = np.asarray(block_ids).reshape(-1)
-
-            if len(block_ids) != len(X):
-                raise ValueError(
-                    "block_ids must contain one value per sample"
-                )
-
         if not self.use_shap_drift:
             raise RuntimeError(
-                "SHAP drift detection is disabled for this ablation run"
+                "SHAP drift detection is disabled "
+                "for this ablation run"
             )
 
-        # Apply Module A only when enabled.
-        if self.use_correlation_graph:
-            X_model = self.correlation_graph.transform(
-                X,
-                block_ids=block_ids,
-            )
-        else:
-            X_model = X
+        X_model = self.transform_features(
+            X,
+            block_ids=block_ids,
+        )
 
-        # Compare SHAP importance rankings against the training reference.
-        # No labels are required.
-        return self.shap_drift.transform(X_model)
+        return self.shap_drift.transform(
+            X_model,
+            block_ids=block_ids,
+        )
+
     def detect_shap_drift(
         self,
         X: np.ndarray,
         block_ids: np.ndarray | None = None,
-    ):
-        """
-        Alias for detect_drift().
+    ) -> SHAPDriftResult:
+        """Alias for detect_drift()."""
 
-        Provided explicitly because the project methodology refers to
-        Module C as SHAP drift detection.
-
-        Parameters
-        ----------
-        X : np.ndarray
-            Raw saurabh49 input features.
-        block_ids : np.ndarray | None
-            Optional contiguous-time block identifiers.
-
-        Returns
-        -------
-        SHAPDriftResult
-            Window-level Kendall tau values and drift flags.
-        """
         return self.detect_drift(
             X,
             block_ids=block_ids,
-        )    # -----------------------------------------------------------------
+        )
+
+    # -----------------------------------------------------------------
     # Convenience information
     # -----------------------------------------------------------------
 
     @property
-    def n_trees(self) -> int:
+    def n_trees(
+        self,
+    ) -> int:
         """
         Number of trees effectively used after early stopping.
         """
@@ -615,15 +699,17 @@ class SaurabhXGBoost:
         self._check_fitted()
 
         if self.best_iteration_ is not None:
-            return int(
-                self.best_iteration_
-            ) + 1
+            return (
+                self.best_iteration_ + 1
+            )
 
         return int(
             self.params["n_estimators"]
         )
 
-    def summary(self) -> dict[str, Any]:
+    def summary(
+        self,
+    ) -> dict[str, Any]:
         """
         Return a compact summary of the fitted methodology.
         """
@@ -644,15 +730,43 @@ class SaurabhXGBoost:
                 self.best_iteration_
             ),
             "n_trees": self.n_trees,
+
+            "modules": {
+                "correlation_graph": (
+                    self.use_correlation_graph
+                ),
+                "dynamic_threshold": (
+                    self.use_dynamic_threshold
+                ),
+                "shap_drift": (
+                    self.use_shap_drift
+                ),
+            },
+
             "correlation_window_size": (
                 self.correlation_window_size
             ),
+
             "threshold_window_size": (
                 self.threshold_window_size
             ),
+
             "shap_window_size": (
                 self.shap_window_size
             ),
+
+            "shap_background_size": (
+                self.shap_background_size
+            ),
+
+            "shap_sample_size": (
+                self.shap_sample_size
+            ),
+
+            "shap_drift_threshold": (
+                self.shap_drift_threshold
+            ),
+
             "threshold_statistics": (
                 self.validation_threshold_statistics_
             ),
@@ -751,7 +865,9 @@ class SaurabhXGBoost:
                 f"per sample"
             )
 
-    def _check_fitted(self) -> None:
+    def _check_fitted(
+        self,
+    ) -> None:
         """Raise an error when called before fit()."""
 
         if not self.fitted_:
