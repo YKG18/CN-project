@@ -24,7 +24,6 @@ DATA4CYBER_RAW = DATA / "data4cyber" / "raw"
 DATA4CYBER_PROCESSED = DATA / "data4cyber" / "processed"
 
 RESULTS = ROOT / "results"
-CONFIGS = ROOT / "configs"
 
 # --- reproducibility ---------------------------------------------------
 SEED = 42

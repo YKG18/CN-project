@@ -196,7 +196,7 @@ def build_base38(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 #: NOTE: `ran_ue_id` is NOT in this list, so it survives into the 49 features
 #: even though it is a session identifier rather than a behaviour metric. That
 #: is what the notebook does and we reproduce it faithfully; see
-#: docs/AUDIT_AND_DECISIONS.md.
+#: the known-limitations section of docs/PROJECT_DECISIONS.md.
 NON_ML_COLS = [
     TIME_COL, "imeisv", "5g_tmsi", "amf_ue_id", "rnti", "ran_id", "ran_plmn",
     "tac", "tac_plmn", "registered",

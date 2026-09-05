@@ -4,9 +4,11 @@ The rules all five members follow. If your code disagrees with this file, your
 code is wrong. If this file is wrong, change it here first and tell the group —
 do not work around it locally.
 
-Companion documents:
-* `docs/Implementation.md` — the phase plan and division of work.
-* `docs/AUDIT_AND_DECISIONS.md` — what the pipeline audit found and fixed.
+The only other documents you need:
+* `README.md` — setup, dataset placement, how to run things.
+* `docs/Implementation.md` — roadmap and division of work. A plan, not a spec;
+  where it disagrees with this file on method, this file wins.
+* the reference papers in `docs/`.
 
 ---
 
@@ -282,19 +284,111 @@ markers. Download links and unpack locations are in the root `README.md`;
 `src/common/config.py` resolves every path from the repository root, so no code
 ever contains `C:/Users/<name>/...`.
 
-**Outstanding:** the raw Data4Cyber capture set (~400 MB, including `.pcapng`)
-is already committed on `feature/data-pipeline`. `.gitignore` prevents
-recurrence but does not remove it from history. See `AUDIT_AND_DECISIONS.md`
-§4 A1 — that branch should not be merged as is.
+The raw Data4Cyber captures that were once committed have been removed from
+history. Keep it that way: put datasets under `data/`, never anywhere else in
+the tree, and never commit them. Only each Data4Cyber scenario's `dataset.csv`
+is used by any pipeline — the `.pcapng` captures are not needed at all.
+
+---
+
+## Datasets
+
+Neither dataset is committed. Download links and unpack locations are in
+`README.md`. Facts everyone should share:
+
+### NCSRD-DS-5GDDoS — https://zenodo.org/records/13900057
+
+| | |
+|---|---|
+| File used | `amari_ue_data_classic_tabular.csv`, an Amarisoft 5G testbed capture |
+| Raw size | 424,660 rows × 80 columns; 424,221 usable after timestamp cleaning |
+| Sampling | one row per UE per ~5 s |
+| UEs | 7 distinct `imeisv` values |
+| Cells | `cell_1_*` and `cell_3_*`; a UE attaches to one at a time, so ~57 % of per-cell columns are NaN |
+| Label | `attack_label`, derived by time-window matching — the raw data has no label column |
+| Class balance | ~397,597 benign / ~26,624 attack — **6.28 % positive** |
+| Attack classes | SYN flood, ICMP flood, UDP fragmentation, DNS flood, GTP-U flood |
+| Missing values | ~9.8 M NaNs, median-imputed; `bearer_1_apn` is 18 % missing and dropped |
+| Categoricals | `*_apn`, `*_ip`, `*_ipv6` only — every modelled feature is numeric |
+| Windows | 500 samples (threshold / correlation), 1000 samples (SHAP drift) |
+
+Attack windows come from the dataset documentation and are treated as ground
+truth, both endpoints inclusive. Saurabh's paper reports 397,576 / 26,645 —
+about 21 rows differ from ours, almost certainly a boundary convention.
+Harmless, but state which you used.
+
+### Data4Cyber — https://zenodo.org/records/19965384
+
+| | |
+|---|---|
+| Files used | `dataset.csv` in each of 8 scenario folders (`S0_…`–`S6_…`) |
+| Raw size | 14,354 rows × 156 columns (~1,800 rows per scenario) |
+| Sampling | one row per second |
+| Label | `attack_active` (`True`/`False`); `attack_phase` gives finer classes |
+| Class balance | ~55 % attack overall — far more balanced than NCSRD |
+| Attack classes | Industroyer (PV, BSS), ARP spoofing / MitM, MQTT supply-chain compromise |
+| Features | 145 numeric candidates → 140 after the train-fit variance filter |
+| Excluded | `Attacker.*` (trivial giveaway), `*.realtime` and `Profile.timestamp` (clock leakage, D3) |
+| Windows | 60 s, 30 s stride, built inside one block/scenario |
+
+Per-scenario attack rate: S0 0.00, S1 0.51, S1_alt 0.51, S2 0.51, S3 1.00,
+S4 0.70, S5 0.74, S6 0.75. Attack is strongly time-localized (benign first,
+attack later) — which is why a naive chronological split would be degenerate
+and the primary split assigns stratified contiguous blocks instead.
+
+---
+
+## Reference targets
+
+Numbers to reproduce, **not** to hard-code. Attack class unless stated.
+
+| Source | Configuration | F1 | Precision | Recall |
+|---|---|---:|---:|---:|
+| Base paper | XGBoost, 38 features | 0.97 | 0.96 | 0.98 |
+| Saurabh | Baseline static | 0.9573 | 0.9448 | 0.9701 |
+| Saurabh | + Graph | 0.9653 | 0.9599 | 0.9707 |
+| Saurabh | + SHAP drift | 0.9625 | 0.9520 | 0.9731 |
+| Saurabh | All three | 0.9648 | 0.9587 | 0.9711 |
+| Saurabh | Baseline adaptive | 0.9730 | 0.9615 | 0.9848 |
+
+The base paper also reports accuracy 0.996 and weighted F1 1.00. Saurabh
+reports the graph cutting false positives from 302 to 216, and adaptive
+thresholding producing FPR outliers up to 0.34 in borderline windows — the
+latter is the specific weakness our proposed work targets.
+
+Expect the project-standard split (D2) to score **below** these; that gap is a
+finding, not a failure.
+
+---
+
+## Known limitations to state in the report
+
+Deliberately not "fixed", because fixing them would break reproduction:
+
+* **NCSRD median imputation is global**, computed before the split. A mild leak;
+  a median over 424k rows barely moves. Faithful to notebook 03.
+* **`ran_ue_id` is in `saurabh49`.** It is a session identifier, not a behaviour
+  metric, but notebook 03 never drops it. Reproduced as-is; absent from
+  `base38`.
+* **Reference-split scaling leakage.** `ncsrd_prep.py` fits the scaler on the
+  whole file. `refit_scaler=True` (the project-standard default) removes it.
+* **LSTM windows re-split independently** of the row-level split, so a deep
+  model's partition is not identical to XGBoost's. Only matters if anyone does
+  the optional D8 work.
+* **Data4Cyber is small**: ~3.5k test rows but only ~85 test windows. Never
+  over-read a window-level number there.
 
 ---
 
 ## Conventions
 
-* **Branches.** `main` holds shared material: plan, decisions, config, data
-  pipelines, docs. Members work on `feature/<area>` and merge by PR.
-  `M1 → src/base/`, `M2 → src/saurabh/`, `M3 → src/proposed/`,
-  `M4 → src/common/`, `M5 → run_experiment.py` + evaluator + results.
+* **Branches.** `main` is the shared foundation: decisions, config, data
+  pipelines, tests, docs. Four working branches, one per member who still has
+  code to write — `feature/base` (M1 → `src/base/`), `feature/saurabh`
+  (M2 → `src/saurabh/`), `feature/proposed` (M3 → `src/proposed/`),
+  `feature/evaluation` (M5 → `run_experiment.py`, evaluator, results).
+  Merge to `main` by PR. M4's pipeline work is already on `main`, so
+  `feature/data-pipeline` and `develop` are no longer needed.
 * **Seed.** `config.SEED = 42` everywhere. Record it in every results row.
 * **Paths.** Import from `src/common/config.py`. Never hard-code.
 * **Model interface.** Every method exposes `fit()`, `predict_proba()`,
