@@ -91,8 +91,9 @@ def check(name: str, fn) -> None:
 
 def make_raw_csv(path: Path, n: int = 3000, seed: int = 0) -> None:
     rng = np.random.default_rng(seed)
-    # Timestamps straddle the first attack window so both classes appear.
-    t = pd.date_range("2024-08-18 06:30:00", periods=n, freq="5s", tz="UTC")
+    # 30s spacing over ~25 hours, so the fixture yields plenty of 20-minute
+    # blocks. Timestamps straddle the real attack windows so both classes appear.
+    t = pd.date_range("2024-08-18 06:30:00", periods=n, freq="30s", tz="UTC")
     data: dict[str, object] = {"_time": t.astype(str)}
     for c in RAW_COLUMNS:
         if c == "_time":
@@ -210,12 +211,15 @@ def ncsrd_checks(tmp: Path) -> None:
     check("project-standard split is disjoint and complete", _split_disjoint)
 
     def _temporal_order():
-        sp = ad._split
-        t = ad._time
+        # strategy="temporal" is still offered (it is NOT the project standard
+        # any more -- see D2 -- but the code path must stay correct).
+        at = NetworkDataAdapter(out / "ncsrd_saurabh49.csv", verbose=False)
+        at.split(strategy="temporal", test_size=0.2, val_size=0.1, random_state=42)
+        sp, t = at._split, at._time
         assert t[sp["train"]].max() <= t[sp["val"]].min(), "train overlaps val in time"
         assert t[sp["val"]].max() <= t[sp["test"]].min(), "val overlaps test in time"
-        return "train < val < test chronologically; no future leaks backwards"
-    check("project-standard split is strictly chronological", _temporal_order)
+        return "train < val < test chronologically"
+    check("the temporal strategy remains strictly chronological", _temporal_order)
 
     def _refit_scaler():
         tr = ad._split["train"]
@@ -285,6 +289,133 @@ def ncsrd_checks(tmp: Path) -> None:
 # Data4Cyber checks (skipped when the raw data is absent)
 # ---------------------------------------------------------------------------
 
+
+    # --- project-standard block split (D2) ---------------------------------
+    print("\n[NCSRD] project-standard block split")
+    from common import config as cfg
+
+    adb = NetworkDataAdapter(out / "ncsrd_saurabh49.csv", verbose=False)
+    adb.split(**cfg.PROJECT_STANDARD_SPLIT)
+
+    def _block_non_degenerate():
+        sp = adb._split
+        for name in ("train", "val", "test"):
+            y = adb.y[sp[name]]
+            assert len(y) > 0, f"{name} split is empty"
+            assert len(np.unique(y)) == 2, (
+                f"{name} split has only class {np.unique(y).tolist()} - a "
+                f"threshold cannot be selected on a single-class validation set")
+        rates = {k: round(float(adb.y[sp[k]].mean()), 4)
+                 for k in ("train", "val", "test")}
+        return f"all splits have both classes; attack rates {rates}"
+    check("block split is non-degenerate (both classes everywhere)",
+          _block_non_degenerate)
+
+    def _blocks_whole():
+        sp = adb._split
+        seen = {}
+        for name in ("train", "val", "test"):
+            for blk in np.unique(adb._blocks[sp[name]]):
+                assert blk not in seen, (
+                    f"block {blk} appears in both {seen[blk]} and {name} - "
+                    f"a contiguous block must stay entirely on one side")
+                seen[blk] = name
+        return f"{len(seen)} blocks, each entirely within one split"
+    check("no contiguous block spans two splits", _blocks_whole)
+
+    def _no_row_shuffling():
+        # Every row of a block must land in the same split as its block.
+        sp = adb._split
+        side = np.empty(len(adb.y), dtype=object)
+        for name in ("train", "val", "test"):
+            side[sp[name]] = name
+        for blk in np.unique(adb._blocks):
+            sides = set(side[adb._blocks == blk])
+            assert len(sides) == 1, (
+                f"block {blk} was split across {sides} - rows must move as "
+                f"whole blocks, never individually")
+        return "rows move only as whole blocks"
+    check("no row-level shuffling across splits", _no_row_shuffling)
+
+    def _disjoint_complete():
+        sp = adb._split
+        tr, va, te = (set(sp[k].tolist()) for k in ("train", "val", "test"))
+        assert not (tr & va) and not (tr & te) and not (va & te), "splits overlap"
+        assert len(tr | va | te) == len(adb.y), "split does not cover every row"
+        return f"train={len(tr)} val={len(va)} test={len(te)}"
+    check("block split is disjoint and covers every row", _disjoint_complete)
+
+    def _deterministic():
+        a = NetworkDataAdapter(out / "ncsrd_saurabh49.csv", verbose=False)
+        a.split(**cfg.PROJECT_STANDARD_SPLIT)
+        b_ = NetworkDataAdapter(out / "ncsrd_saurabh49.csv", verbose=False)
+        b_.split(**cfg.PROJECT_STANDARD_SPLIT)
+        for k in ("train", "val", "test"):
+            assert np.array_equal(a._split[k], b_._split[k]), (
+                f"{k} differs between two identical runs - split is not "
+                f"deterministic")
+        c = NetworkDataAdapter(out / "ncsrd_saurabh49.csv", verbose=False)
+        c.split(**{**cfg.PROJECT_STANDARD_SPLIT, "random_state": 7})
+        assert not np.array_equal(a._split["test"], c._split["test"]), (
+            "a different seed produced an identical split")
+        return "same config -> identical indices; different seed -> different"
+    check("block split is deterministic from the seed", _deterministic)
+
+    def _both_feature_sets_same_split():
+        a = NetworkDataAdapter(out / "ncsrd_base38.csv", verbose=False)
+        a.split(**cfg.PROJECT_STANDARD_SPLIT)
+        for k in ("train", "val", "test"):
+            assert np.array_equal(a._split[k], adb._split[k]), (
+                f"base38 and saurabh49 disagree on the {k} rows - one frozen "
+                f"index file must cover both feature sets")
+        return "base38 and saurabh49 get identical row indices"
+    check("one split covers both feature sets", _both_feature_sets_same_split)
+
+    def _block_roundtrip():
+        pth = adb.save_split(tmp / "block_split.npz")
+        re = NetworkDataAdapter(out / "ncsrd_saurabh49.csv", verbose=False).load_split(pth)
+        assert re._split["strategy"] == "block"
+        assert re._split["block_minutes"] == cfg.BLOCK_MINUTES
+        assert np.array_equal(re._split["test"], adb._split["test"])
+        assert re._blocks is not None, "block ids were not restored on load"
+        assert np.array_equal(re._blocks, adb._blocks)
+        return "strategy, block_minutes, indices and block ids all restored"
+    check("frozen block split round-trips exactly", _block_roundtrip)
+
+    def _bundle_carries_blocks():
+        bb = adb.for_xgboost(balance="none")
+        assert bb.test_block is not None, (
+            "DataBundle.test_block is required so methods can window inside a "
+            "block instead of across boundaries")
+        assert len(bb.test_block) == len(bb.y_test)
+        assert np.array_equal(bb.test_block, adb._blocks[bb.test_index])
+        # ordered by (block, time) -> each block is one contiguous run
+        runs = int((np.diff(bb.test_block) != 0).sum()) + 1
+        assert runs == len(np.unique(bb.test_block)), (
+            "test rows are not grouped by block; windowing would interleave "
+            "blocks")
+        return f"{len(np.unique(bb.test_block))} test blocks, contiguous runs"
+    check("DataBundle exposes block ids for window construction",
+          _bundle_carries_blocks)
+
+    def _blocks_are_contiguous_in_time():
+        # Within a block, timestamps must form one contiguous stretch.
+        span = cfg.BLOCK_MINUTES * 60 * 1_000_000_000
+        for blk in np.unique(adb._blocks)[:20]:
+            ts = adb._time[adb._blocks == blk]
+            assert ts.max() - ts.min() < span, (
+                f"block {blk} spans more than {cfg.BLOCK_MINUTES} minutes")
+        return f"each block covers at most {cfg.BLOCK_MINUTES} minutes"
+    check("blocks are contiguous in time", _blocks_are_contiguous_in_time)
+
+    def _timestamp_units():
+        # int64 must be NANOseconds; a us/ns mix-up silently maps 2024 -> 1970.
+        yr = pd.to_datetime(pd.Series(adb._time), unit="ns", utc=True).dt.year
+        assert set(yr.unique()) == {2024}, (
+            f"timestamps decode to years {sorted(set(yr.unique()))}, expected "
+            f"2024 - _time must be nanoseconds since epoch")
+        return "test_time / _time are nanoseconds since epoch"
+    check("timestamps are nanoseconds, not microseconds", _timestamp_units)
 
 def data4cyber_checks() -> None:
     proc = ROOT / "data" / "data4cyber" / "processed"
