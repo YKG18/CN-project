@@ -17,7 +17,20 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "common" / "data"))
-sys.path.insert(0, str(ROOT / "experiments" / "ncsrd"))
+
+
+def _load(name: str, path: Path):
+    """Import a runner by file path.
+
+    Both experiment folders contain a `run_base.py`; putting both on sys.path
+    would make one shadow the other.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 import ncsrd_prep  # noqa: E402
 from base.base_xgboost import (  # noqa: E402
@@ -47,6 +60,138 @@ def toy(n=4000, f=38, rate=0.0628, seed=0):
     X = rng.normal(size=(n, f)).astype(np.float32)
     X[y == 1] += 1.4
     return X, y
+
+
+
+def data4cyber_checks() -> None:
+    """Data4Cyber base pipeline. Skipped when the processed data is absent."""
+    import json
+
+    from common import config as cfg
+    proc = cfg.DATA4CYBER_PROCESSED
+    if not (proc / "block" / "manifest.json").exists():
+        print("\n[Data4Cyber] SKIPPED - run src/common/data/data4cyber_prep.py first")
+        return
+
+    print("\n[Data4Cyber] base pipeline")
+    d4c_run = _load("d4c_run_base",
+                    ROOT / "experiments" / "data4cyber" / "run_base.py")
+
+    def _primary_is_block():
+        assert d4c_run.PRIMARY_MODE == "block", (
+            f"D3 makes `block` the primary split, got {d4c_run.PRIMARY_MODE}")
+        assert set(d4c_run.SPLIT_MODES) == {"block", "scenario"}
+        return "block primary, scenario secondary"
+    check("Data4Cyber uses the D3 primary split", _primary_is_block)
+
+    def _loads_and_shapes():
+        man = json.loads((proc / "block" / "manifest.json").read_text())
+        nf = len(man["features"])
+        for name in ("train", "validation", "test"):
+            d = d4c_run.load_split("block", name)
+            assert d["X"].shape[1] == nf, (
+                f"{name} has {d['X'].shape[1]} features, manifest says {nf}")
+            assert len(d["y"]) == len(d["X"]) == len(d["block"]) == len(d["scenario"])
+            assert np.isfinite(d["X"]).all(), f"{name} contains NaN/inf"
+        return f"row arrays load with {nf} features and aligned metadata"
+    check("Data4Cyber row arrays load consistently", _loads_and_shapes)
+
+    def _non_degenerate():
+        rates = {}
+        for name in ("train", "validation", "test"):
+            d = d4c_run.load_split("block", name)
+            assert len(np.unique(d["y"])) == 2, (
+                f"{name} split is single-class; no threshold could be selected")
+            rates[name] = round(float(d["y"].mean()), 4)
+        return f"both classes in every split; attack rates {rates}"
+    check("Data4Cyber splits are non-degenerate", _non_degenerate)
+
+    def _no_leaky_features():
+        man = json.loads((proc / "block" / "manifest.json").read_text())
+        f = man["features"]
+        bad = [c for c in f
+               if c.endswith((".realtime", ".timestamp"))
+               or "attack" in c.lower() or "scenario" in c.lower()
+               or c.lower() in ("timestamp", "block")]
+        assert not bad, f"leaky/identifying columns in the feature set: {bad}"
+        return f"{len(f)} features, no clocks, attacker fields or scenario ids"
+    check("Data4Cyber features carry no scenario leakage", _no_leaky_features)
+
+    def _blocks_disjoint():
+        seen = {}
+        for name in ("train", "validation", "test"):
+            d = d4c_run.load_split("block", name)
+            for b in np.unique(d["block"]):
+                assert b not in seen, (
+                    f"block {b} is in both {seen[b]} and {name}")
+                seen[b] = name
+        return f"{len(seen)} blocks, each entirely on one side"
+    check("no Data4Cyber block spans two splits", _blocks_disjoint)
+
+    def _ratio_grid():
+        # attack-majority: candidates must stop at the natural ratio
+        y_maj_attack = np.array([1] * 610 + [0] * 390)
+        c = d4c_run.candidate_ratios(y_maj_attack)
+        nat = 610 / 390
+        assert abs(c[-1] - round(nat, 4)) < 1e-6, (
+            f"last candidate should be the untouched ratio {nat:.4f}, got {c[-1]}")
+        assert all(r <= nat + 1e-9 for r in c), f"candidates exceed natural ratio: {c}"
+        assert len(set(c)) == len(c), "duplicate candidates"
+        # benign-majority still gets a wide grid
+        c2 = d4c_run.candidate_ratios(np.array([0] * 940 + [1] * 60))
+        assert len(c2) > len(c), "benign-majority grid should be wider"
+        return f"attack-majority grid {c}"
+    check("undersampling grid adapts to the class balance", _ratio_grid)
+
+    def _end_to_end():
+        rec = d4c_run.run_one("block", cfg.SEED, drop_profile=False, verbose=False)
+        assert rec["split_role"] == "primary"
+        assert rec["threshold"]["selected_on"] == "validation", (
+            "threshold must come from validation, never test")
+        m = rec["metrics"]["test"]
+        for k in ("precision", "recall", "f1", "accuracy", "fpr", "roc_auc",
+                  "weighted_f1"):
+            assert k in m, f"missing primary metric {k}"
+            assert 0.0 <= m[k] <= 1.0, f"{k} out of range: {m[k]}"
+        assert m["tp"] + m["fp"] + m["fn"] + m["tn"] == rec[
+            "class_distribution"]["test"]["n"], "confusion counts do not sum to test n"
+        assert rec["model"]["eval_metric"] == "logloss"
+        assert rec["model"]["trees_after_early_stopping"] < \
+            rec["model"]["n_estimators"], "early stopping did not trigger"
+        return (f"F1={m['f1']:.4f} P={m['precision']:.4f} R={m['recall']:.4f} "
+                f"AUC={m['roc_auc']:.4f}")
+    check("Data4Cyber base run completes with valid metrics", _end_to_end)
+
+    def _reproducible():
+        a = d4c_run.run_one("block", cfg.SEED, drop_profile=False, verbose=False)
+        b_ = d4c_run.run_one("block", cfg.SEED, drop_profile=False, verbose=False)
+        assert a["metrics"]["test"] == b_["metrics"]["test"], (
+            "two identical runs disagree - the experiment is not reproducible")
+        assert a["threshold"]["value"] == b_["threshold"]["value"]
+        return "identical metrics across runs at the project seed"
+    check("Data4Cyber base run is reproducible", _reproducible)
+
+    def _primary_secondary_separate():
+        sec = d4c_run.run_one("scenario", cfg.SEED, drop_profile=False, verbose=False)
+        assert sec["split_role"] == "secondary_unseen_attack"
+        pri = d4c_run.run_one("block", cfg.SEED, drop_profile=False, verbose=False)
+        assert pri["split_policy"] != sec["split_policy"]
+        assert pri["metrics"]["test"] != sec["metrics"]["test"], (
+            "primary and secondary produced identical metrics - are they really "
+            "different splits?")
+        return "block and scenario reported as distinct experiments"
+    check("primary and secondary evaluations stay separate",
+          _primary_secondary_separate)
+
+    def _writes_nothing():
+        before = {p_ for p_ in (ROOT / "results").rglob("*") if p_.is_file()}
+        d4c_run.run_one("block", cfg.SEED, drop_profile=False, verbose=False)
+        after = {p_ for p_ in (ROOT / "results").rglob("*") if p_.is_file()}
+        assert before == after, (
+            f"run_one() wrote into results/: {sorted(after - before)} - "
+            f"result collection belongs to Member 5")
+        return "no artifacts created under results/"
+    check("the Data4Cyber run writes nothing to results/", _writes_nothing)
 
 
 def main() -> int:
@@ -98,6 +243,39 @@ def main() -> int:
         assert abs(scale_pos_weight_of(np.array([0] * 90 + [1] * 10)) - 9.0) < 1e-9
         return "n_neg / n_pos"
     check("scale_pos_weight matches the XGBoost definition", _spw)
+
+    def _undersample_inverts():
+        # Data4Cyber-shaped: the ATTACK class is the majority. The paper's rule
+        # is "reduce the majority, keep all minority", so attacks must be thinned
+        # and every benign row kept.
+        rng = np.random.default_rng(5)
+        y2 = (rng.random(6000) < 0.61).astype(int)
+        X2 = rng.normal(size=(6000, 8)).astype(np.float32)
+        n_ben = int((y2 == 0).sum())
+        _, yr = undersample_majority(X2, y2, 1.0, seed=42)
+        assert int((yr == 0).sum()) == n_ben, (
+            "benign is the minority here and must be kept in full")
+        assert int((yr == 1).sum()) < int((y2 == 1).sum()), (
+            "attack is the majority here and must be thinned")
+        assert int((yr == 1).sum()) == n_ben, "ratio 1.0 should balance the set"
+        return "majority detected from the data, not hard-coded"
+    check("undersampling thins whichever class is the majority",
+          _undersample_inverts)
+
+    def _ncsrd_direction_unchanged():
+        # Regression guard: on a benign-majority set the behaviour must be
+        # exactly the historical one (keep all attacks, subsample benign).
+        rg = np.random.default_rng(42)
+        pos, neg = np.flatnonzero(y == 1), np.flatnonzero(y == 0)
+        k = min(len(neg), int(round(len(pos) * 2.0)))
+        want = np.concatenate([pos, rg.choice(neg, size=k, replace=False)])
+        rg.shuffle(want)
+        Xr, yr = undersample_majority(X, y, 2.0, seed=42)
+        assert np.array_equal(yr, y[want]) and np.array_equal(Xr, X[want]), (
+            "benign-majority resampling changed - NCSRD results would move")
+        return "NCSRD (benign-majority) resampling is bit-identical"
+    check("generalising undersampling did not move the NCSRD path",
+          _ncsrd_direction_unchanged)
 
     # --- threshold selection ------------------------------------------------
     def _threshold_on_val():
@@ -183,7 +361,7 @@ def main() -> int:
 
     # --- lineage separation (D1) -------------------------------------------
     def _uses_base38():
-        import run_base
+        run_base = _load("ncsrd_run_base", ROOT / "experiments" / "ncsrd" / "run_base.py")
         assert run_base.FEATURE_SET == "base38", (
             f"the base-paper runner must use base38, not {run_base.FEATURE_SET}")
         assert run_base.CONFIG_NAME == "base_paper"
@@ -192,7 +370,7 @@ def main() -> int:
     check("base-paper runner uses the 38-feature lineage", _uses_base38)
 
     def _no_saurabh_mixing():
-        import run_base
+        run_base = _load("ncsrd_run_base", ROOT / "experiments" / "ncsrd" / "run_base.py")
         b38 = set(ncsrd_prep.BASE38_FEATURES)
         s49 = {"ul_retx_max", "dl_retx_max", "ran_ue_id", "cell_1_cqi", "cell_3_cqi"}
         assert not (b38 & s49), f"saurabh49-only columns leaked into base38: {b38 & s49}"
@@ -201,12 +379,14 @@ def main() -> int:
     check("base38 and saurabh49 stay separate", _no_saurabh_mixing)
 
     def _paper_targets():
-        import run_base
+        run_base = _load("ncsrd_run_base", ROOT / "experiments" / "ncsrd" / "run_base.py")
         t = run_base.PAPER_TARGETS
         assert t["accuracy"] == 0.996 and t["precision"] == 0.96
         assert t["recall"] == 0.98 and t["f1"] == 0.97
         return "Table III targets recorded, not hard-coded as results"
     check("paper targets are stored for comparison only", _paper_targets)
+
+    data4cyber_checks()
 
     print("\n" + "=" * 70)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

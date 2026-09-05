@@ -16,7 +16,9 @@ Two split policies, reported separately and never conflated (D2):
              frozen index so Base, Saurabh and Proposed use identical rows.
              Stricter; reported alongside, never instead of, the reproduction.
 
-Outputs (nothing here writes into `data/`):
+Results are printed. Nothing is written unless you pass `--save`, because
+final result collection belongs to Member 5. With `--save` you get:
+
     results/raw/base_ncsrd_results.csv     one row per run, D6 schema
     results/raw/base_ncsrd_<split>.json    full configuration + metrics
     results/tables/base_ncsrd_table3.md    side-by-side with the paper
@@ -128,7 +130,7 @@ def make_plots(y_test, p_test, tau, out_dir: Path, tag: str) -> list[str]:
     return written
 
 
-def run_one(split_name: str, seed: int, quick: bool) -> dict:
+def run_one(split_name: str, seed: int, quick: bool, save: bool = False) -> dict:
     print(f"\n{'=' * 72}\n{CONFIG_NAME} / {FEATURE_SET} / split={split_name}\n{'=' * 72}")
 
     ad = NetworkDataAdapter.for_feature_set(FEATURE_SET)
@@ -161,18 +163,19 @@ def run_one(split_name: str, seed: int, quick: bool) -> dict:
         print("      contiguous chronological band can miss them entirely. That is")
         print("      a property of the split policy, not of this model. See the")
         print("      report; not writing results for this split.")
-        raw = ROOT / "results" / "raw"
-        raw.mkdir(parents=True, exist_ok=True)
-        (raw / f"base_ncsrd_{split_name}.blocked.json").write_text(
-            json.dumps({
+        if save:
+            raw = ROOT / "results" / "raw"
+            raw.mkdir(parents=True, exist_ok=True)
+            (raw / f"base_ncsrd_{split_name}.blocked.json").write_text(
+                json.dumps({
                 "config": CONFIG_NAME, "feature_set": FEATURE_SET,
                 "split_policy": split_name, "status": "blocked", "reason": msg,
                 "validation_class_counts": counts,
                 "class_distribution": {
                     name: {"n": int(len(y)), "attack": int((y == 1).sum())}
-                    for name, y in (("train", b.y_train), ("val", b.y_val),
-                                    ("test", b.y_test))},
-            }, indent=2), encoding="utf-8")
+                        for name, y in (("train", b.y_train), ("val", b.y_val),
+                                        ("test", b.y_test))},
+                }, indent=2), encoding="utf-8")
         return None
 
     print("\n  selecting the undersampling ratio on validation")
@@ -270,16 +273,16 @@ def run_one(split_name: str, seed: int, quick: bool) -> dict:
                    "test_inference_ms": round(infer_ms, 3)},
     }
 
-    plots = make_plots(b.y_test, p_test, tau, ROOT / "results" / "plots", split_name)
-    detail["plots"] = plots
-
-    raw = ROOT / "results" / "raw"
-    raw.mkdir(parents=True, exist_ok=True)
-    # This split produced real results, so drop any stale "blocked" marker.
-    (raw / f"base_ncsrd_{split_name}.blocked.json").unlink(missing_ok=True)
-    (raw / f"base_ncsrd_{split_name}.json").write_text(
-        json.dumps(detail, indent=2, default=float), encoding="utf-8")
-
+    if save:
+        detail["plots"] = make_plots(b.y_test, p_test, tau,
+                                     ROOT / "results" / "plots", split_name)
+        raw = ROOT / "results" / "raw"
+        raw.mkdir(parents=True, exist_ok=True)
+        # This split produced real results, so drop any stale "blocked" marker.
+        (raw / f"base_ncsrd_{split_name}.blocked.json").unlink(missing_ok=True)
+        (raw / f"base_ncsrd_{split_name}.json").write_text(
+            json.dumps(detail, indent=2, default=float), encoding="utf-8")
+    record["_detail"] = detail
     return record
 
 
@@ -302,11 +305,7 @@ def write_csv(records: list[dict]) -> Path:
 
 def write_table(records: list[dict]) -> Path:
     ref = next((r for r in records if r["split_policy"] == "reference"), None)
-    detail = {}
-    for r in records:
-        p = ROOT / "results" / "raw" / f"base_ncsrd_{r['split_policy']}.json"
-        if p.exists():
-            detail[r["split_policy"]] = json.loads(p.read_text(encoding="utf-8"))
+    detail = {r["split_policy"]: r["_detail"] for r in records if "_detail" in r}
 
     rows = [("Accuracy", "accuracy"), ("Precision (0)", "precision_0"),
             ("Recall (0)", "recall_0"), ("F1 (0)", "f1_0"),
@@ -414,6 +413,9 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=config.SEED)
     p.add_argument("--quick", action="store_true",
                    help="skip the undersampling-ratio search (smoke test)")
+    p.add_argument("--save", action="store_true",
+                   help="write CSV, JSON, table and plots under results/ "
+                        "(off by default: Member 5 owns result collection)")
     a = p.parse_args(argv)
 
     data = config.NCSRD_PROCESSED / f"ncsrd_{FEATURE_SET}.csv"
@@ -424,17 +426,26 @@ def main(argv=None) -> int:
         return 2
 
     names = list(SPLIT_POLICIES) if a.split == "both" else [a.split]
-    records = [r for r in (run_one(n, a.seed, a.quick) for n in names) if r]
+    records = [r for r in (run_one(n, a.seed, a.quick, a.save) for n in names) if r]
     if not records:
         print("\nno usable results produced", file=sys.stderr)
         return 1
 
-    csv_path = write_csv(records)
-    tbl_path = write_table(records)
-    print(f"\n{'=' * 72}")
-    print(f"results -> {csv_path.relative_to(ROOT)}")
-    print(f"table   -> {tbl_path.relative_to(ROOT)}")
-    print(f"details -> results/raw/base_ncsrd_<split>.json")
+    print(f"\n{'=' * 72}\nsummary (attack class)\n{'=' * 72}")
+    print(f"  {'split':<18}{'P':>9}{'R':>9}{'F1':>9}{'acc':>9}{'FPR':>9}{'AUC':>9}")
+    for r in records:
+        print(f"  {r['split_policy']:<18}{r['precision']:>9.4f}{r['recall']:>9.4f}"
+              f"{r['f1']:>9.4f}{r['accuracy']:>9.4f}{r['fpr']:>9.4f}"
+              f"{r['roc_auc']:>9.4f}")
+
+    if a.save:
+        csv_path = write_csv(records)
+        tbl_path = write_table(records)
+        print(f"\nresults -> {csv_path.relative_to(ROOT)}")
+        print(f"table   -> {tbl_path.relative_to(ROOT)}")
+        print(f"details -> results/raw/base_ncsrd_<split>.json")
+    else:
+        print("\n  (no files written; pass --save if you want them under results/)")
     return 0
 
 

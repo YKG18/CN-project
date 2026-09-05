@@ -267,6 +267,19 @@ never split mid-block — so the windowing rule is identical on either side:
 **build windows inside one block** (D2). `data4cyber_prep.make_windows` already
 enforces it; on NCSRD use `bundle.test_block`.
 
+### The attack class is the MAJORITY here
+
+NCSRD is 6.28 % attack; Data4Cyber train is ~61 % attack. Any imbalance
+handling written for NCSRD points the wrong way unless it decides the majority
+from the data. The base paper's rule -- "reduce the majority class while
+retaining all minority class samples" -- therefore thins *attacks* on
+Data4Cyber. `base_xgboost.undersample_majority()` already does this; SMOTE-style
+oversampling of "the minority" likewise means oversampling **benign** here.
+Check the direction before reusing NCSRD code.
+
+Ratios above the natural class ratio (~1.56) are no-ops, so a grid built for
+NCSRD's 14.9:1 imbalance mostly repeats the same fit.
+
 ### Always excluded
 `*.realtime` and `Profile.timestamp` are absolute wall-clocks. All 8 scenarios
 occupy disjoint clock ranges, so those columns are a perfect scenario id and a
@@ -466,6 +479,13 @@ Deliberately not "fixed", because fixing them would break reproduction:
   the optional D8 work.
 * **Data4Cyber is small**: ~3.5k test rows but only ~85 test windows. Never
   over-read a window-level number there.
+* **`Profile.*` are simulator driving inputs**, not measured telemetry
+  (irradiance, load and PV setpoints), and they track time of day — the
+  strongest single-feature AUC on Data4Cyber is `Profile.total_irradiance` at
+  0.76. They are kept because they are part of the released feature set and a
+  real EMS knows them, but a sensitivity run without them is worth quoting:
+  Base F1 moves 0.8949 → 0.8986, so the result does not depend on them
+  (`experiments/data4cyber/run_base.py --no-profile`).
 * **The NCSRD block split still shares attack episodes across splits.** With
   only five attack windows, blocks from the same episode land in different
   splits, so train and test can contain different minutes of the *same* attack.
