@@ -102,21 +102,33 @@ class DataBundle:
     scale_pos_weight: float = 1.0
     meta: dict[str, Any] = field(default_factory=dict)
 
-    # Original row ids in the processed CSV, so predictions can be joined back
-    # to `sequence_index.csv` for window-based evaluation (per-window FPR,
-    # threshold adaptation, SHAP drift). `test_index`/`val_index` stay aligned
-    # with `y_test`/`y_val`; `train_index` is the split *before* any resampling,
-    # so it does NOT align with `y_train` once balance != "none".
+        # Original row ids in the processed CSV.
+    #
+    # These describe the frozen split BEFORE any optional training resampling.
+    # Therefore val/test metadata always aligns with X_val/X_test, while
+    # train metadata aligns with the original training split and should not be
+    # assumed to align with X_train after balance != "none".
     train_index: np.ndarray | None = None
     val_index: np.ndarray | None = None
     test_index: np.ndarray | None = None
-    # Row-aligned with `y_test`; None when sequence_index.csv is missing.
-    test_time: np.ndarray | None = None      # int64 NANOseconds since epoch, UTC
-    test_ue: np.ndarray | None = None        # integer UE codes
-    #: Contiguous-time block id per test row (``strategy="block"`` only).
-    #: Build evaluation windows WITHIN one block -- never across two, or a
-    #: window would splice together rows from different points in the
-    #: capture. Rows come back ordered by (block, time).
+
+    # Timestamp metadata, int64 nanoseconds since epoch (UTC).
+    train_time: np.ndarray | None = None
+    val_time: np.ndarray | None = None
+    test_time: np.ndarray | None = None
+
+    # UE metadata from sequence_index.csv.
+    train_ue: np.ndarray | None = None
+    val_ue: np.ndarray | None = None
+    test_ue: np.ndarray | None = None
+
+    # Contiguous-time block identifiers.
+    #
+    # For block-based splits, windows must stay inside one block. These arrays
+    # align with the ORIGINAL frozen split rows. train_block does not align
+    # with X_train after optional resampling.
+    train_block: np.ndarray | None = None
+    val_block: np.ndarray | None = None
     test_block: np.ndarray | None = None
 
     @property
@@ -686,11 +698,25 @@ class NetworkDataAdapter:
 
         test_idx = sp["test"]
         return DataBundle(
-            X_train=Xtr, y_train=ytr, X_val=Xva, y_val=yva, X_test=Xte, y_test=yte,
-            train_index=sp["train"], val_index=sp["val"], test_index=test_idx,
+            X_train=Xtr, y_train=ytr, X_val=Xva, y_val=yva,
+            X_test=Xte, y_test=yte,
+
+            train_index=sp["train"],
+            val_index=sp["val"],
+            test_index=test_idx,
+
+            train_time=None if self._time is None else self._time[sp["train"]],
+            val_time=None if self._time is None else self._time[sp["val"]],
             test_time=None if self._time is None else self._time[test_idx],
+
+            train_ue=None if self._ue is None else self._ue[sp["train"]],
+            val_ue=None if self._ue is None else self._ue[sp["val"]],
             test_ue=None if self._ue is None else self._ue[test_idx],
+
+            train_block=None if self._blocks is None else self._blocks[sp["train"]],
+            val_block=None if self._blocks is None else self._blocks[sp["val"]],
             test_block=None if self._blocks is None else self._blocks[test_idx],
+
             model=model,
             feature_names=list(self.feature_names),
             input_shape=input_shape,
