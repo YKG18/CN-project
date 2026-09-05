@@ -49,7 +49,8 @@ Then build the processed datasets and check them:
 ```bash
 python src/common/data/ncsrd_prep.py         # -> ncsrd_base38.csv + ncsrd_saurabh49.csv
 python src/common/data/data4cyber_prep.py    # -> block/ (primary) + scenario/ (secondary)
-python tests/test_pipeline.py                # 22 sanity checks
+python src/common/data/freeze_split.py       # freeze the shared project-standard split
+python tests/test_pipeline.py                # pipeline sanity checks
 ```
 
 `ncsrd_prep.py` takes ~30 s and ~2 GB of peak RAM. Both scripts print every step.
@@ -63,13 +64,14 @@ data/                     datasets — git-ignored, download them
 src/
   common/
     config.py             frozen seed, split policies, paths. Import this.
-    data/                 ncsrd_prep.py, ncsrd_adapter.py, data4cyber_prep.py
+    data/                 ncsrd_prep.py, ncsrd_adapter.py, data4cyber_prep.py,
+                          freeze_split.py
   base/                   M1 — base paper (XGBoost, static threshold)
   saurabh/                M2 — correlation graph, dynamic threshold, SHAP drift
   proposed/               M3 — EWMA, CUSUM, constrained τ, FastSHAP, distillation
 experiments/{ncsrd,data4cyber}/   per-dataset run scripts
 results/{raw,tables,plots}/
-tests/test_pipeline.py    run after touching src/common/
+tests/                    test_pipeline.py (shared), test_base.py (M1)
 run_experiment.py         M5 — unified runner (interface defined, not built yet)
 docs/                     decisions, roadmap, reference papers
 ```
@@ -77,22 +79,33 @@ docs/                     decisions, roadmap, reference papers
 ## Using the data
 
 ```python
-import sys; sys.path.insert(0, "src/common/data")
+import sys; sys.path.insert(0, "src"); sys.path.insert(0, "src/common/data")
+from common import config
 from ncsrd_adapter import NetworkDataAdapter
 
 ad = NetworkDataAdapter.for_feature_set("base38")    # or "saurabh49"
-ad.project_standard_split()                           # or ad.reference_split()
+
+# headline runs: load the frozen shared split, never roll your own
+ad.load_split(config.SPLIT_INDEX_FILE)
+# reproduction runs against published numbers:
+# ad.reference_split()
 
 b = ad.for_xgboost(balance="undersample")
 model.fit(b.X_train, b.y_train)
 probs = model.predict_proba(b.X_test)[:, 1]
 ```
 
+For project-standard runs, build evaluation windows **inside one block**
+(`b.test_block`) — test rows are blocks scattered through the capture, so a
+window crossing a boundary joins moments hours apart. See PROJECT_DECISIONS.md
+D2.
+
 `for_xgboost()` returns a `DataBundle` with `X_train/y_train`, `X_val/y_val`,
 `X_test/y_test`, `feature_names`, `input_shape`, `class_weight`,
 `scale_pos_weight`, and — for window-based evaluation — `train_index`,
-`val_index`, `test_index`, `test_time`, `test_ue`. `.describe()` prints a
-summary worth pasting into the report. The test split is never resampled.
+`val_index`, `test_index`, `test_time` (int64 nanoseconds), `test_ue` and
+`test_block`. `.describe()` prints a summary worth pasting into the report.
+The test split is never resampled.
 
 For Data4Cyber, load `data/data4cyber/processed/block/<split>_rows.npz`
 (`X`, `y`, `scenario`, `block`, `timestamp`). Row level is the primary metric
@@ -111,8 +124,9 @@ Do not change any of these alone — everything downstream depends on them.
 |---|---|---|
 | Random seed | `42` | `config.SEED` |
 | Reference split | random stratified 80/20, global scaling | `config.REFERENCE_SPLIT` |
-| Project-standard split | temporal 70/10/20, train-only scaling | `config.PROJECT_STANDARD_SPLIT` |
-| Frozen split indices | shared by all three methods | `config.SPLIT_INDEX_FILE` |
+| Project-standard split | stratified contiguous 20-min blocks, 70/10/20, train-only scaling | `config.PROJECT_STANDARD_SPLIT` |
+| Block length | 20 minutes (fits a 1000-sample SHAP window) | `config.BLOCK_MINUTES` |
+| Frozen split indices | shared by all three methods; build with `src/common/data/freeze_split.py` | `config.SPLIT_INDEX_FILE` |
 | NCSRD feature sets | `base38` / `saurabh49` | `ncsrd_prep.FEATURE_SETS` |
 | Data4Cyber split | `block` primary, `scenario` secondary | `data4cyber_prep.SPLIT_MODES` |
 | Threshold | chosen on validation, reported on test | PROJECT_DECISIONS.md D5 |

@@ -58,7 +58,7 @@ FEATURE_SETS = ("base38", "saurabh49")
 DEFAULT_FEATURE_SET = "saurabh49"
 DEFAULT_INDEX = "sequence_index.csv"
 
-Strategy = Literal["random", "temporal", "group"]
+Strategy = Literal["random", "temporal", "group", "block"]
 Balance = Literal["none", "smote", "oversample", "undersample", "class_weight"]
 SeqMode = Literal["windows", "features"]
 LabelMode = Literal["last", "any"]
@@ -111,8 +111,13 @@ class DataBundle:
     val_index: np.ndarray | None = None
     test_index: np.ndarray | None = None
     # Row-aligned with `y_test`; None when sequence_index.csv is missing.
-    test_time: np.ndarray | None = None      # int64 nanoseconds, UTC
+    test_time: np.ndarray | None = None      # int64 NANOseconds since epoch, UTC
     test_ue: np.ndarray | None = None        # integer UE codes
+    #: Contiguous-time block id per test row (``strategy="block"`` only).
+    #: Build evaluation windows WITHIN one block -- never across two, or a
+    #: window would splice together rows from different points in the
+    #: capture. Rows come back ordered by (block, time).
+    test_block: np.ndarray | None = None
 
     @property
     def n_features(self) -> int:
@@ -211,7 +216,7 @@ class NetworkDataAdapter:
             )
 
         # Optional sidecars ------------------------------------------------
-        self._time: np.ndarray | None = None      # int64 nanoseconds
+        self._time: np.ndarray | None = None      # int64 nanoseconds since epoch
         self._ue: np.ndarray | None = None        # integer UE codes
         self._ue_labels: np.ndarray | None = None
         self._load_index(index_path)
@@ -222,6 +227,7 @@ class NetworkDataAdapter:
             self.prep_meta = json.loads(meta_file.read_text(encoding="utf-8"))
 
         self._split: dict[str, Any] | None = None
+        self._blocks: np.ndarray | None = None    # set by strategy='block'
 
         self._log(f"[adapter] {self.data_path.name}: {self._X.shape[0]:,} rows x "
                   f"{len(self.feature_names)} features")
@@ -295,7 +301,14 @@ class NetworkDataAdapter:
             )
             return
 
-        self._time = pd.to_datetime(idx["_time"], utc=True).astype("int64").to_numpy()
+        # Force nanosecond resolution before going to int64. pandas >= 2 parses
+        # these strings to datetime64[us], so a bare .astype("int64") would hand
+        # out MICROseconds while every consumer assumes nanoseconds -- silently
+        # turning 2024 timestamps into 1970 ones downstream.
+        ts = pd.to_datetime(idx["_time"], utc=True)
+        if hasattr(ts.dt, "as_unit"):
+            ts = ts.dt.as_unit("ns")
+        self._time = ts.astype("int64").to_numpy()
         codes, labels = pd.factorize(idx["imeisv"], sort=True)
         self._ue = codes.astype(np.int64)
         self._ue_labels = np.asarray(labels)
@@ -334,7 +347,8 @@ class NetworkDataAdapter:
               val_size: float = 0.0,
               random_state: int = 42,
               stratify: bool = True,
-              refit_scaler: bool = False) -> "NetworkDataAdapter":
+              refit_scaler: bool = False,
+              block_minutes: int = 30) -> "NetworkDataAdapter":
         """Choose the train/val/test partition. Returns self, so it chains.
 
         Strategies
@@ -353,8 +367,21 @@ class NetworkDataAdapter:
         ``"group"``
             ``GroupShuffleSplit`` on ``imeisv``: no UE appears in both splits.
             Answers "does this generalize to a UE we have never seen?".
+        ``"block"`` — the project-standard policy (PROJECT_DECISIONS.md, D2)
+            Cuts the capture into contiguous ``block_minutes`` blocks and
+            assigns *whole blocks*, stratified by each block's attack content.
+            Rows never move individually, so near-duplicate neighbours stay on
+            the same side, and every split still contains both classes --
+            which a plain ``"temporal"`` slice does not, because NCSRD's five
+            attack windows are short and widely separated.
 
         ``val_size`` is a fraction of the *whole* dataset, carved out of train.
+        For ``"block"`` all three parts are drawn from the block pool at once.
+
+        ``block_minutes``
+            Block length for ``strategy="block"``. Ignored otherwise. Must
+            stay comfortably above the longest evaluation window any method
+            uses (1000 samples for SHAP drift) so windows fit inside a block.
 
         ``refit_scaler``
             ``ncsrd_prep.py`` fits ``StandardScaler`` on all 424,221 rows *before* any
@@ -379,7 +406,12 @@ class NetworkDataAdapter:
         n = len(self._y)
         all_idx = np.arange(n)
 
-        if strategy == "random":
+        if strategy == "block":
+            self._require_index("strategy='block'")
+            train_idx, val_idx_pre, test_idx, blocks = self._block_split(
+                test_size, val_size, random_state, block_minutes)
+            self._blocks = blocks
+        elif strategy == "random":
             train_idx, test_idx = train_test_split(
                 all_idx, test_size=test_size, random_state=random_state,
                 stratify=self._y if stratify else None,
@@ -400,7 +432,9 @@ class NetworkDataAdapter:
             )
 
         val_idx = None
-        if val_size > 0:
+        if strategy == "block":
+            val_idx = val_idx_pre                      # already carved from blocks
+        elif val_size > 0:
             frac = val_size / (1 - test_size)          # fraction *of the train part*
             if strategy == "temporal":
                 cut = int(round(len(train_idx) * (1 - frac)))
@@ -428,6 +462,7 @@ class NetworkDataAdapter:
             "random_state": random_state,
             "stratify": stratify,
             "refit_scaler": refit_scaler,
+            "block_minutes": block_minutes,
         }
 
         if refit_scaler:
@@ -450,6 +485,65 @@ class NetworkDataAdapter:
                       "or 'group' for a conservative estimate.")
         return self
 
+    # -- block split (project standard) ------------------------------------
+
+    def block_ids(self, block_minutes: int) -> np.ndarray:
+        """Contiguous-time block id for every row, 0-based from the capture start."""
+        self._require_index("block_ids()")
+        span = int(block_minutes) * 60 * 1_000_000_000        # ns
+        return ((self._time - self._time.min()) // span).astype(np.int64)
+
+    def _block_split(self, test_size: float, val_size: float, random_state: int,
+                     block_minutes: int):
+        """Assign whole contiguous blocks to train/val/test, stratified.
+
+        Each block is placed in a stratum by its attack content -- all benign,
+        mixed, or all attack -- and each stratum is dealt out independently, so
+        every split ends up with both classes and with boundary blocks. Whole
+        blocks move together, so neighbouring near-duplicate rows can never
+        straddle a split.
+        """
+        blocks = self.block_ids(block_minutes)
+        uniq = np.unique(blocks)
+
+        rate = np.array([self._y[blocks == b].mean() for b in uniq])
+        stratum = np.where(rate <= 0.0, 0, np.where(rate >= 1.0, 2, 1))
+
+        rng = np.random.default_rng(random_state)
+        where = {}
+        for st in np.unique(stratum):
+            pool = uniq[stratum == st].copy()
+            rng.shuffle(pool)
+            n = len(pool)
+            if n >= 3:
+                n_test = min(max(1, round(n * test_size)), n - 2)
+                n_val = min(max(1, round(n * val_size)), n - n_test - 1) if val_size > 0 else 0
+            elif n == 2:
+                n_test, n_val = 1, 0
+            else:
+                n_test, n_val = 0, 0
+            for b in pool[:n_test]:
+                where[int(b)] = "test"
+            for b in pool[n_test:n_test + n_val]:
+                where[int(b)] = "val"
+            for b in pool[n_test + n_val:]:
+                where[int(b)] = "train"
+
+        side = np.array([where[int(b)] for b in blocks])
+        # Order every split by (block, time) so `test_block` / `test_time` come
+        # back as a clean stream and grouping by block gives contiguous runs.
+        key = np.lexsort((self._time, blocks))
+        out = []
+        for name in ("train", "val", "test"):
+            sel = key[side[key] == name]
+            out.append(sel)
+
+        self._log(f"[split] block strategy: {len(uniq)} blocks of {block_minutes} min "
+                  f"({int(np.bincount(stratum, minlength=3)[0])} benign / "
+                  f"{int(np.bincount(stratum, minlength=3)[1])} mixed / "
+                  f"{int(np.bincount(stratum, minlength=3)[2])} attack)")
+        return out[0], (out[1] if len(out[1]) else None), out[2], blocks
+
     def _ensure_split(self) -> dict[str, Any]:
         if self._split is None:
             self._log("[split] no split configured — applying the notebook-04 default "
@@ -471,7 +565,7 @@ class NetworkDataAdapter:
             config=np.array(json.dumps({
                 k: sp[k] for k in
                 ("strategy", "test_size", "val_size", "random_state", "stratify",
-                      "refit_scaler")
+                      "refit_scaler", "block_minutes")
             })),
         )
         self._log(f"[split] saved -> {path}")
@@ -488,6 +582,8 @@ class NetworkDataAdapter:
             "test": z["test"],
             **cfg,
         }
+        if self._split.get("strategy") == "block":
+            self._blocks = self.block_ids(int(self._split["block_minutes"]))
         if self._split.get("refit_scaler"):
             tr = self._split["train"]
             mu = self._X0[tr].mean(axis=0)
@@ -594,6 +690,7 @@ class NetworkDataAdapter:
             train_index=sp["train"], val_index=sp["val"], test_index=test_idx,
             test_time=None if self._time is None else self._time[test_idx],
             test_ue=None if self._ue is None else self._ue[test_idx],
+            test_block=None if self._blocks is None else self._blocks[test_idx],
             model=model,
             feature_names=list(self.feature_names),
             input_shape=input_shape,
@@ -601,7 +698,7 @@ class NetworkDataAdapter:
             scale_pos_weight=self._scale_pos_weight(ytr),
             meta={**{k: sp[k] for k in
                      ("strategy", "test_size", "val_size", "random_state", "stratify",
-                      "refit_scaler")},
+                      "refit_scaler", "block_minutes")},
                   "balance": balance, "layout": reshape},
         )
 
@@ -856,7 +953,7 @@ class NetworkDataAdapter:
             scale_pos_weight=self._scale_pos_weight(ytr),
             meta={**{k: sp[k] for k in
                      ("strategy", "test_size", "val_size", "random_state", "stratify",
-                      "refit_scaler")},
+                      "refit_scaler", "block_minutes")},
                   "balance": balance, "layout": "3d",
                   "sequence_mode": "windows", "timesteps": timesteps,
                   "stride": stride, "label_mode": label_mode},

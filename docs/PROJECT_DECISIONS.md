@@ -123,13 +123,25 @@ public dataset. Say so in the report, and document every deviation.
 
 ## D2 — NCSRD evaluation: two clearly separate purposes
 
+> **CHANGED — everyone must re-freeze.** The project-standard split used to be
+> a plain chronological 70/10/20 slice. That is now **stratified contiguous
+> blocks**, because the old policy produced a validation band with **zero
+> attack rows** (NCSRD's five attack windows are short and far apart), which
+> made threshold selection impossible. If you froze a split before this change,
+> delete it and rerun `python src/common/data/freeze_split.py`.
+
 ### A. Reference reproduction
+
 Compare against published numbers as faithfully as possible.
-`config.REFERENCE_SPLIT` — random stratified 80/20, seed 42, scaler as
-`ncsrd_prep.py` fit it (globally).
+
+| Config | Use |
+|---|---|
+| `config.REFERENCE_SPLIT` | random stratified 80/20, seed 42, no validation, scaler as `ncsrd_prep.py` fit it — Saurabh's notebook exactly |
+| `config.BASE_REFERENCE_SPLIT` | the same, plus 10 % validation, for methods that need one (early stopping, threshold selection) |
 
 ```python
-ad.reference_split()
+ad.reference_split()                       # == config.REFERENCE_SPLIT
+ad.split(**config.BASE_REFERENCE_SPLIT)    # when you need a validation set
 ```
 
 Optimistic by construction: rows are 5-second samples of the same 7 UEs, so a
@@ -137,30 +149,95 @@ random split puts near-duplicates on both sides, and the scaler saw the test
 rows. **Never quote these as the headline.**
 
 ### B. Project standard — the headline comparison
-`config.PROJECT_STANDARD_SPLIT` — temporal 70/10/20, train-only scaling.
+
+`config.PROJECT_STANDARD_SPLIT` — **stratified contiguous 20-minute blocks**,
+70/10/20, train-only scaling.
 
 ```python
-ad.project_standard_split()
+ad.project_standard_split()                # or, preferably, load the frozen file
 ```
 
-Chronological, so no future information leaks backwards, and all preprocessing
-statistics come from training rows only.
+How it works: the capture is cut into `config.BLOCK_MINUTES` blocks; each block
+is put in a stratum by its attack content (all benign / mixed / all attack);
+whole blocks are then dealt to train, validation and test. Rows never move
+individually, so near-duplicate neighbours stay on the same side, and every
+split gets both classes.
+
+Measured on the real data (seed 42):
+
+| split | rows | attack | rate | blocks |
+|---|---:|---:|---:|---:|
+| train | 296,846 | 18,713 | 6.30 % | 229 |
+| validation | 41,313 | 2,551 | 6.17 % | 33 |
+| test | 86,062 | 5,360 | 6.23 % | 66 |
+
+against a 6.28 % population rate. Train contains all five attack types.
+
+**Why 20 minutes.** A block must exceed the longest evaluation window any
+method uses (`SHAP_WINDOW` = 1000 samples). At 20 minutes the median block
+holds ~1,400 rows, so both the 500-sample threshold window and the
+1000-sample SHAP window fit inside one block. At 10 minutes blocks hold ~700
+rows and the SHAP window does not fit; at 30 minutes too few attack blocks
+remain to spread across three splits. Changing `BLOCK_MINUTES` means
+re-checking both properties.
 
 ### One frozen split for all three methods
 
-Build once, commit the index file, everyone loads it:
+```bash
+python src/common/data/freeze_split.py          # once, writes config.SPLIT_INDEX_FILE
+python src/common/data/freeze_split.py --check  # verify yours matches
+```
 
 ```python
-# once
-ad = NetworkDataAdapter.for_feature_set("saurabh49").project_standard_split()
-ad.save_split(config.SPLIT_INDEX_FILE)
-
-# everyone else, every method
-ad = NetworkDataAdapter.for_feature_set(...).load_split(config.SPLIT_INDEX_FILE)
+ad = NetworkDataAdapter.for_feature_set("saurabh49").load_split(
+         config.SPLIT_INDEX_FILE)
 ```
 
 `base38` and `saurabh49` are built from identical rows in identical order, so
-one index file applies to both. Nobody calls `split()` with their own numbers.
+one index file applies to both — a test asserts this. The file lives under the
+git-ignored `data/`; it is not committed, but it is fully determined by
+`PROJECT_STANDARD_SPLIT` and `SEED`, so every machine regenerates the same
+indices. **Nobody calls `split()` with their own numbers.**
+
+### Build every window INSIDE one block
+
+This is the part that will silently corrupt results if ignored. Test rows are
+now a set of blocks scattered through the capture, not one continuous stream.
+A 500- or 1000-sample window that runs off the end of a block splices together
+moments hours apart.
+
+`DataBundle` gives you what you need:
+
+```python
+b = ad.for_xgboost(balance="none")
+# b.test_block  block id per test row   (rows come back ordered by block, time)
+# b.test_time   int64 NANOseconds since epoch, UTC
+# b.test_index  original row ids
+
+for blk in np.unique(b.test_block):
+    rows = np.flatnonzero(b.test_block == blk)      # already chronological
+    for start in range(0, len(rows) - W + 1, W):    # W = 500 or 1000
+        window = rows[start:start + W]
+```
+
+Skip blocks shorter than your window, exactly as `data4cyber_prep.make_windows`
+does. This applies to Saurabh's Module B (500-sample adaptive threshold) and
+Module C (1000-sample SHAP drift), and to the proposed EWMA/CUSUM baseline
+updates.
+
+### Fit every baseline on training rows only
+
+Under the project-standard policy, anything estimated from data is estimated
+from **training rows**, not the whole file:
+
+* the benign **correlation baseline** for Saurabh's Module A and our EWMA
+  baseline — use training benign rows, not all benign rows;
+* the **SHAP reference ranking** that drift is measured against;
+* scaling — already handled by `refit_scaler=True`.
+
+Saurabh's notebook computes the correlation baseline over the entire dataset.
+That is fine inside the `reference` reproduction; it is leakage inside
+`project_standard`.
 
 ---
 
@@ -185,6 +262,11 @@ experiment. Report it separately, clearly labelled. Do not put it in the main
 
 Output: `data/data4cyber/processed/scenario/`
 
+Both datasets now use the same idea — whole contiguous blocks, stratified,
+never split mid-block — so the windowing rule is identical on either side:
+**build windows inside one block** (D2). `data4cyber_prep.make_windows` already
+enforces it; on NCSRD use `bundle.test_block`.
+
 ### Always excluded
 `*.realtime` and `Profile.timestamp` are absolute wall-clocks. All 8 scenarios
 occupy disjoint clock ranges, so those columns are a perfect scenario id and a
@@ -201,6 +283,13 @@ ROC-AUC. Use `<split>_rows.npz` on Data4Cyber and the `DataBundle` on NCSRD.
 **Windows only for metrics that genuinely need a time axis:** FPR variance,
 maximum FPR, threshold variance, drift and adaptation behaviour, detection
 latency, drift latency, drift-event counts.
+
+Under the project-standard split those windows must be built **inside one
+block** — see D2. A window that crosses a block boundary joins moments hours
+apart and any stability or latency number computed from it is meaningless.
+Window counts are therefore smaller than the row counts suggest: the NCSRD test
+split has 66 blocks of ~1,400 rows, so roughly 160 windows of 500 or 80 of
+1000. Report the window count alongside any window-level metric.
 
 Always state the sample size. Data4Cyber has ~3.5k test rows but only ~85 test
 windows — a window-level number there is noisy and must not be over-read.
@@ -377,6 +466,21 @@ Deliberately not "fixed", because fixing them would break reproduction:
   the optional D8 work.
 * **Data4Cyber is small**: ~3.5k test rows but only ~85 test windows. Never
   over-read a window-level number there.
+* **The NCSRD block split still shares attack episodes across splits.** With
+  only five attack windows, blocks from the same episode land in different
+  splits, so train and test can contain different minutes of the *same* attack.
+  It is therefore an honest generalization estimate, **not** an unseen-attack
+  test. The Data4Cyber `scenario` split (D3) is where unseen-attack robustness
+  is measured.
+* **The NCSRD test split does not contain every attack type.** Train sees all
+  five; test sees a subset. That is a consequence of stratifying ~19 attack
+  blocks across three splits, and it is why the attack *rate* rather than the
+  attack *mix* is matched across splits.
+* **`_time` is int64 nanoseconds since epoch.** pandas ≥ 2 parses these
+  timestamps to `datetime64[us]`, so a bare `.astype("int64")` yields
+  microseconds and silently turns 2024 into 1970. The adapter forces
+  nanoseconds; a test guards it. Decode with
+  `pd.to_datetime(t, unit="ns", utc=True)`.
 
 ---
 
@@ -396,3 +500,7 @@ Deliberately not "fixed", because fixing them would break reproduction:
 * **Changing shared code** (`src/common/`, split policy, metric definitions)
   requires telling the group first. Everything downstream depends on it.
 * **After touching the pipeline**, run `python tests/test_pipeline.py`.
+* **Before any project-standard run**, `python src/common/data/freeze_split.py
+  --check` — it tells you whether your frozen indices match the current policy.
+* **Never call `split()` yourself for a project-standard run.** Load
+  `config.SPLIT_INDEX_FILE`. The runners do this automatically.
