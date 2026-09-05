@@ -14,9 +14,16 @@ data/**
 *.parquet
 
 # --- generated outputs ------------------------------------------------
+# Experiment results ARE tracked: they are small, and the group needs the
+# tables and plots without re-running anything. Trained models and any bulky
+# intermediates are not (see the *.pkl / *.npz rules).
 results/**
 !results/**/
 !results/**/.gitkeep
+!results/**/*.csv
+!results/**/*.json
+!results/**/*.md
+!results/**/*.png
 experiments/**/outputs/
 outputs/
 *.pkl
