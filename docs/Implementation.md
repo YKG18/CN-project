@@ -39,20 +39,20 @@ a higher F1.
 |---|---|---|---|
 | 0 | Repo, environment, shared interfaces | M4 | **done** |
 | 1 | Common data pipelines (NCSRD + Data4Cyber) | M4 | **done** |
-| 2 | Base paper reproduction, NCSRD | M1 | **next** |
-| 3 | Saurabh reproduction, NCSRD | M2 | after 2 |
-| 4 | Proposed method | M3 | after 3 |
-| 5 | Unified runner + common evaluator | M5 | alongside 3–4 |
-| 6 | 3 × 1 NCSRD comparison | M5 | after 4 |
-| 7 | Data4Cyber adaptation, all three methods | all | after 6 |
-| 8 | Final 3 × 2 comparison | M5 | after 7 |
-| 9 | Proposed ablation | M5 + M3 | after 8 |
-| 10 | Non-stationary traffic experiments | M4 | after 4 |
-| 11 | Edge / latency benchmark | M3 + M5 | after 4 |
-| 12 | Plots, tables, report, demo | all | last |
+| 2 | Base paper reproduction, NCSRD | M1 | **done** |
+| 3 | Saurabh reproduction, NCSRD | M2 | **done** |
+| 4 | Proposed method | M3 | **done** |
+| 5 | Unified runner + common evaluator | M5 | **done** |
+| 6 | 3 × 1 NCSRD comparison | M5 | **done** |
+| 7 | Data4Cyber adaptation, all three methods | all | **done** |
+| 8 | Final 3 × 2 comparison | M5 | **done** — `python run_experiment.py --all` |
+| 9 | Proposed ablation | M5 + M3 | **done** — `results/tables/proposed_ablation_matrix.md` |
+| 10 | Non-stationary traffic experiments | M3 | **done** — `experiments/ncsrd/run_nonstationary.py` |
+| 11 | Edge / latency benchmark | M3 + M5 | partial — latency and model size are in the D6 row |
+| 12 | Plots, tables, report, demo | all | plots and tables in `results/` |
 
-Phases 2, 3 and 4 can overlap once each member has the frozen split. Nothing
-downstream of phase 4 should start before the 3 × 1 NCSRD comparison looks sane.
+All six matrix cells run. The remaining open items (phase 10, and power/CPU
+measurement in phase 11) are optional extras, not blockers for the report.
 
 ---
 
@@ -64,7 +64,9 @@ downstream of phase 4 should start before the 3 × 1 NCSRD comparison looks sane
   `scale_pos_weight`, logloss, early stopping on validation.
 * `base_saurabh_static` — the `saurabh49` feature set, SMOTE on train,
   `n_estimators=300, max_depth=6, learning_rate=0.05, subsample=0.8,
-  colsample_bytree=0.8`. This is the anchor for Saurabh's ablation row A0.
+  colsample_bytree=0.8`. Intended as the anchor for Saurabh's ablation row A0.
+  **Not implemented**; M2's own A0 ablation row covers that comparison, so this
+  is optional.
 
 Each runs under both split policies (D2): `reference` for comparison with
 published numbers, `project_standard` for the headline tables.
@@ -124,6 +126,19 @@ for F1.
 | `fast_shap.py` | FastSHAP / LinearSHAP, 50–100 sample window, incremental Kendall tau. Measure the sensitivity-versus-latency trade-off |
 | `distillation.py` | Distil the augmented XGBoost into a small shallow network; benchmark size, memory, latency, CPU, power |
 
+Status against the brief: all five directions are implemented and execute.
+Direction 5 lives in `src/proposed/nonstationary.py` +
+`experiments/ncsrd/run_nonstationary.py` and reports FPR stability over 1,003
+sliding windows.
+
+Two gaps remain, both documented in PROJECT_DECISIONS.md:
+
+* the online baseline runs but does not influence classification, and measurement
+  shows it cannot with this architecture — the divergence feature only carries
+  signal against a fixed reference;
+* the FPR-constrained threshold is fitted once on validation rather than
+  re-solved per window as the brief describes.
+
 Expose the same `fit()` / `predict_proba()` / `predict()` interface as everyone
 else.
 
@@ -152,12 +167,16 @@ Do not change ML algorithms — that is M1/M2/M3 territory.
 **Owns `run_experiment.py`, the evaluator, and `results/`.** Target:
 
 ```bash
-python run_experiment.py --dataset ncsrd --method base
+python run_experiment.py --all                              # the whole 3 × 2
+python run_experiment.py --dataset ncsrd --method base      # one cell
 python run_experiment.py --dataset data4cyber --method proposed
 ```
 
 One evaluator implementing the D6 metric definitions — nobody else computes
-metrics by hand. Every run emits the D6 results row.
+metrics by hand. Every run emits the D6 results row. Methods whose decision rule
+is not a single global cut (Saurabh's per-window τ, the proposed constrained τ)
+pass their own `predict()` output to the evaluator, so their mechanism is
+actually the thing being scored.
 
 **Proposed ablation** (design it before running the final experiments):
 

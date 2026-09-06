@@ -27,12 +27,12 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-from src.common import config
-from src.common.data.ncsrd_adapter import NetworkDataAdapter
-from src.base.base_xgboost import evaluate
-from src.saurabh.saurabh_xgboost import SaurabhXGBoost
+from common import config
+from common.data.ncsrd_adapter import NetworkDataAdapter
+from base.base_xgboost import evaluate
+from saurabh.saurabh_xgboost import SaurabhXGBoost
 
 
 # ======================================================================
@@ -65,6 +65,37 @@ ABLATIONS = {
     "xgboost_only": {
         "use_correlation_graph": False,
         "use_dynamic_threshold": False,
+        "use_shap_drift": False,
+    },
+    # --- Saurabh's published five-configuration ablation (paper Table) ------
+    # The four entries above are a leave-one-out design of our own. These are
+    # the ADDITIVE configurations the paper actually reports, so its numbers
+    # (A0 0.9573, A1 0.9653, A2 0.9625, A3 0.9648, A4 0.9730) can be compared
+    # row for row. A0 == xgboost_only and A3 == full; both are kept separately
+    # so each design reads cleanly on its own.
+    "A0_baseline_static": {
+        "use_correlation_graph": False,
+        "use_dynamic_threshold": False,
+        "use_shap_drift": False,
+    },
+    "A1_graph": {
+        "use_correlation_graph": True,
+        "use_dynamic_threshold": False,
+        "use_shap_drift": False,
+    },
+    "A2_shap_drift": {
+        "use_correlation_graph": False,
+        "use_dynamic_threshold": False,
+        "use_shap_drift": True,
+    },
+    "A3_all_three": {
+        "use_correlation_graph": True,
+        "use_dynamic_threshold": True,
+        "use_shap_drift": True,
+    },
+    "A4_baseline_adaptive": {
+        "use_correlation_graph": False,
+        "use_dynamic_threshold": True,
         "use_shap_drift": False,
     },
 }
@@ -239,8 +270,19 @@ def run_drift_detection(
     return drift_result, time.perf_counter() - start
 
 
-def save_json(filename: str, data: Any) -> Path:
-    """Save experiment output under results/raw."""
+SAVE_ENABLED = False
+
+
+def save_json(filename: str, data: Any) -> Path | None:
+    """Save experiment output under results/raw, only when --save is given.
+
+    Result collection belongs to Member 5; a verification run must not silently
+    overwrite committed artifacts.
+    """
+    if not SAVE_ENABLED:
+        print(f"[skip] {filename} not written (pass --save to store it)")
+        return None
+
     output_dir = ROOT / "results" / "raw"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -483,11 +525,20 @@ def parse_args() -> argparse.Namespace:
         help="Experiment to run (default: all).",
     )
 
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="write results under results/raw/ (off by default: Member 5 "
+             "owns result collection)",
+    )
+
     return parser.parse_args()
 
 
 def main() -> None:
+    global SAVE_ENABLED
     args = parse_args()
+    SAVE_ENABLED = args.save
 
     # Load once and reuse the identical frozen split for selected experiments.
     bundle = load_data()

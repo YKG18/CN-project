@@ -157,7 +157,7 @@ class Data4CyberAdapter:
             raise FileNotFoundError(
                 f"{self.root} not found.\n"
                 f"Build Data4Cyber first:\n"
-                f"    python src/common/data/data4cyber/_prep.py "
+                f"    python src/common/data/data4cyber_prep.py "
                 f"--split-mode {split_mode}"
             )
 

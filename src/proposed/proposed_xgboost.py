@@ -29,26 +29,33 @@ from typing import Any, Iterator
 
 import numpy as np
 
-from src.saurabh.saurabh_xgboost import SaurabhXGBoost
+import sys
+from pathlib import Path
 
-from src.proposed.constrained_threshold import (
+# `src/` on sys.path is the repo-wide import convention; adding it here
+# lets this module be imported directly as well as via the runner.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from saurabh.saurabh_xgboost import SaurabhXGBoost
+
+from proposed.constrained_threshold import (
     ConstrainedThreshold,
 )
 
-from src.proposed.ewma import (
+from proposed.ewma import (
     EWMACorrelationBaseline,
 )
 
-from src.proposed.cusum import (
+from proposed.cusum import (
     CUSUMChangeDetector,
 )
 
-from src.proposed.fast_shap import (
+from proposed.fast_shap import (
     LightweightSHAPDriftDetector,
     FastSHAPResult,
 )
 
-from src.proposed.distillation import (
+from proposed.distillation import (
     DistilledEdgeModel,
     DistillationMetrics,
 )
@@ -249,6 +256,16 @@ class ProposedXGBoost:
     )
 
     validation_drift_events_: int = field(
+        default=0,
+        init=False,
+    )
+
+    stream_ewma_updates_: int = field(
+        default=0,
+        init=False,
+    )
+
+    stream_drift_events_: int = field(
         default=0,
         init=False,
     )
@@ -725,6 +742,23 @@ class ProposedXGBoost:
 
         Ground-truth labels may be used during training to identify
         confirmed-benign windows for baseline adaptation.
+
+        INTENTIONALLY UNUSED — do not wire this into `fit()`.
+
+        It looks like the fix for "EWMA adaptation never reaches prediction",
+        because training on adaptive features would make train and serve agree.
+        It was measured and it is not: on the NCSRD project-standard split,
+        training the teacher on these features drops F1 from 0.9792 to 0.0827
+        (0.0016 when also serving with a streaming baseline).
+
+        The reason is structural. The Frobenius divergence is only informative
+        against a *fixed* reference; once the baseline chases the data, the
+        divergence collapses toward zero for attack and benign windows alike and
+        the 50th feature stops carrying signal. Keeping the baseline frozen is
+        what makes the feature work, not a shortcut around leakage.
+
+        Kept for the record so the experiment is reproducible. See
+        docs/PROJECT_DECISIONS.md, known limitations.
         """
         if not self.use_ewma:
             return X
@@ -948,6 +982,131 @@ class ProposedXGBoost:
         return self.model.predict_proba(
             X_model
         )[:, 1]
+
+    def predict_proba_streaming(
+        self,
+        X: np.ndarray,
+        block_ids: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Online prediction with a LIVE EWMA baseline.
+
+        `predict_proba` deliberately uses `fitted_ewma_`, the baseline frozen at
+        the end of training, so it is a pure function of its input. That keeps
+        the batch evaluation reproducible, but it also means the online
+        adaptation never influences classification -- the baseline stays static,
+        which is the exact limitation the proposed work set out to remove.
+
+        This method is the adaptive counterpart: it walks the stream in window
+        order and lets the benign correlation baseline evolve as it goes,
+        exactly as `detect_drift` already does for SHAP.
+
+        Leakage-safe by construction:
+
+        * updates are gated on the model's OWN predictions
+          (`p < selected_threshold_`), never on labels;
+        * CUSUM blocks updates when a change point is flagged, so attack
+          traffic cannot contaminate the baseline;
+        * EWMA/CUSUM state is deep-copied, so repeated calls return identical
+          results and `self` is never mutated.
+
+        Populates `stream_ewma_updates_` and `stream_drift_events_`.
+        """
+
+        self._check_fitted()
+
+        X = self._validate_X(
+            X,
+            "X",
+        )
+
+        if X.shape[1] != self.n_input_features_:
+            raise ValueError(
+                f"Expected {self.n_input_features_} features, "
+                f"received {X.shape[1]}."
+            )
+
+        self.stream_ewma_updates_ = 0
+        self.stream_drift_events_ = 0
+
+        if not self.use_ewma:
+            # No online baseline in this ablation: fall back to the batch path.
+            return self.predict_proba(
+                X,
+                block_ids=block_ids,
+            )
+
+        ewma = copy.deepcopy(
+            self.ewma
+        )
+
+        cusum = copy.deepcopy(
+            self.cusum
+        )
+
+        output = np.zeros(
+            X.shape[0],
+            dtype=np.float64,
+        )
+
+        for start, end in self._window_ranges(
+            X,
+            block_ids,
+        ):
+            window = X[start:end]
+
+            if window.shape[0] < 2:
+                divergence = 0.0
+            else:
+                divergence = ewma.divergence(
+                    window
+                )
+
+            X_model = self._append_feature(
+                window,
+                np.full(
+                    window.shape[0],
+                    divergence,
+                    dtype=np.float64,
+                ),
+            )
+
+            probabilities = (
+                self.model.predict_proba(
+                    X_model
+                )[:, 1]
+            )
+
+            output[start:end] = probabilities
+
+            change_detected = (
+                cusum.update(
+                    divergence
+                )
+            )
+
+            if change_detected:
+                self.stream_drift_events_ += 1
+
+            benign_fraction = float(
+                np.mean(
+                    probabilities
+                    < self.selected_threshold_
+                )
+            )
+
+            if (
+                not change_detected
+                and benign_fraction
+                >= self.benign_update_fraction
+            ):
+                ewma.update(
+                    window
+                )
+
+                self.stream_ewma_updates_ += 1
+
+        return output
 
     # ------------------------------------------------------------------
     # PREDICT

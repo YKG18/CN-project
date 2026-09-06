@@ -20,9 +20,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.common import config
-from src.common.data.ncsrd_adapter import NetworkDataAdapter
-from src.saurabh.saurabh_xgboost import SaurabhXGBoost
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from common import config
+from common.data.ncsrd_adapter import NetworkDataAdapter
+from saurabh.saurabh_xgboost import SaurabhXGBoost
 
 
 def stratified_subset_indices(

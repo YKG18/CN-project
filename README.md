@@ -55,6 +55,73 @@ python tests/test_pipeline.py                # pipeline sanity checks
 
 `ncsrd_prep.py` takes ~30 s and ~2 GB of peak RAM. Both scripts print every step.
 
+## Running the experiments
+
+One command runs the complete 3 × 2 matrix and prints the final comparison:
+
+```bash
+python run_experiment.py --all
+```
+
+It runs Base / Saurabh / Proposed on NCSRD and Data4Cyber, scores every cell
+through the shared evaluator (`src/common/evaluator.py`, D6 definitions), and
+prints one table with the detection metrics, confusion counts, threshold,
+latency, model size and window-level FPR stability. Add `--save` to write the
+D6 rows and detail JSON under `results/raw/`. Takes roughly 15–25 minutes.
+
+`--all` always uses the **NCSRD project-standard split** and the **Data4Cyber
+primary `block` split**. The Data4Cyber `scenario` holdout is a *secondary*
+novel-attack robustness experiment (D3) and is deliberately never part of the
+matrix.
+
+Single cells, when you need one:
+
+```bash
+python run_experiment.py --dataset ncsrd      --method base     --config base_paper
+python run_experiment.py --dataset ncsrd      --method saurabh  --config saurabh_full
+python run_experiment.py --dataset ncsrd      --method proposed --config P6
+python run_experiment.py --dataset data4cyber --method base
+```
+
+### Reproducing the published papers
+
+These are **reference reproductions**, kept separate from the project-standard
+comparison above, and are what to show if asked "did you reproduce the paper?"
+
+```bash
+# Base paper (Xylouris et al., Table III) — 38 features, random stratified split
+python experiments/ncsrd/run_base.py --split reference
+
+# Saurabh's pipeline + ablation (leave-one-out AND his additive A0–A4)
+python experiments/ncsrd/run_saurabh.py --experiment all
+
+# Proposed P0–P7 ablation
+python experiments/ncsrd/run_proposed.py
+
+# Non-stationary benign traffic (faculty direction 5)
+python experiments/ncsrd/run_nonstationary.py
+```
+
+**Note on the Saurabh reproduction.** `run_saurabh.py` runs on the
+project-standard frozen split with `class_weight`, not on Saurabh's own random
+80/20 split with SMOTE, and its per-window thresholds are fitted on validation
+and applied cyclically rather than re-optimised on each test window's labels.
+Those are deliberate leakage-safe deviations (D5), so its numbers are **not**
+expected to match his published 0.9573 / 0.9730 exactly. Only the Base paper
+has a true `--split reference` reproduction path.
+
+`experiments/ncsrd/run_base.py` is the authoritative base-paper reproduction:
+it selects the undersampling ratio on validation, which `run_experiment.py`
+does not (that uses the 1:1 default for speed), so the two give slightly
+different reference numbers. Both are correct; quote the dedicated runner.
+
+Deeper single-method runs, including the Data4Cyber secondary experiment:
+
+```bash
+python experiments/data4cyber/run_base.py --split both   # primary + secondary
+python experiments/data4cyber/run_saurabh_data4cyber.py
+```
+
 ## Structure
 
 ```
@@ -64,17 +131,30 @@ data/                     datasets — git-ignored, download them
 src/
   common/
     config.py             frozen seed, split policies, paths. Import this.
-    data/                 ncsrd_prep.py, ncsrd_adapter.py, data4cyber_prep.py,
+    evaluator.py          M5 — the ONE metric implementation (D6 schema)
+    data/                 ncsrd_prep.py, ncsrd_adapter.py,
+                          data4cyber_prep.py, data4cyber_adapter.py,
                           freeze_split.py
-  base/                   M1 — base paper (XGBoost, static threshold)
-  saurabh/                M2 — correlation graph, dynamic threshold, SHAP drift
-  proposed/               M3 — EWMA, CUSUM, constrained τ, FastSHAP, distillation
-experiments/{ncsrd,data4cyber}/   per-dataset run scripts
-results/{raw,tables,plots}/
-tests/                    test_pipeline.py (shared), test_base.py (M1)
-run_experiment.py         M5 — unified runner (interface defined, not built yet)
+  base/base_xgboost.py    M1 — base paper (XGBoost, static threshold)
+  saurabh/saurabh_xgboost.py
+                          M2 — correlation graph, dynamic threshold, SHAP drift
+  proposed/               M3 — proposed_xgboost.py + ewma, cusum,
+                          constrained_threshold, fast_shap, distillation,
+                          nonstationary
+experiments/ncsrd/        run_base.py, run_saurabh.py, run_proposed.py,
+                          run_nonstationary.py
+experiments/data4cyber/   run_base.py, run_saurabh_data4cyber.py
+results/{raw,tables,plots}/       M5 owns final result collection
+tests/                    test_pipeline.py, test_base.py, test_evaluator.py,
+                          test_proposed.py, test_saurabh_ablation.py,
+                          test_saurabh_integration.py
+run_experiment.py         M5 — unified runner; `--all` runs the whole 3×2
 docs/                     decisions, roadmap, reference papers
 ```
+
+XGBoost is the only model family in the project. CNN/MLP/LSTM are **not**
+implemented (PROJECT_DECISIONS.md D8); some adapters can emit their tensor
+shapes, but no such model exists here.
 
 ## Using the data
 
@@ -136,24 +216,38 @@ Do not change any of these alone — everything downstream depends on them.
 All paths resolve from the repository root via `src/common/config.py`. Never
 hard-code an absolute path.
 
-## Branches
+## Ownership
 
-`main` is the shared foundation. Each member works on their own branch and
-merges back by PR.
+All members' work is merged into `main`.
 
-| Branch | Owner | Scope |
-|---|---|---|
-| `feature/base` | M1 | `src/base/` |
-| `feature/saurabh` | M2 | `src/saurabh/` |
-| `feature/proposed` | M3 | `src/proposed/` |
-| `feature/evaluation` | M5 | `run_experiment.py`, evaluator, tables, plots |
+| Area | Owner |
+|---|---|
+| `src/common/data/`, both pipelines | M4 |
+| `src/base/` | M1 |
+| `src/saurabh/` | M2 |
+| `src/proposed/` | M3 |
+| `run_experiment.py`, `src/common/evaluator.py`, `results/` | M5 |
 
-M4's pipeline work is already merged into `main`, so `feature/data-pipeline`
-and `develop` are no longer needed.
+Rules: shared-interface changes get discussed first; every experiment records
+its config and seed; nobody silently changes preprocessing or the split for one
+method only; metrics come from the shared evaluator, never hand-rolled.
 
-Rules: no experimental commits straight to `main`; shared-interface changes get
-discussed first; every experiment records its config and seed; nobody silently
-changes preprocessing or the split for one method only.
+## Tests
+
+```bash
+python tests/test_pipeline.py            # shared pipelines, splits, leakage
+python tests/test_base.py                # M1 base-paper methodology
+python tests/test_evaluator.py           # M5 D6 metric definitions
+python tests/test_proposed.py            # M3 components, thresholds, distillation
+python tests/test_saurabh_ablation.py    # M2 module on/off matrix
+python tests/test_saurabh_integration.py # M2 end-to-end chain
+```
+
+The two Saurabh files cover different things and both are kept:
+`_ablation` sweeps the module on/off combinations and checks each module's
+effect (feature count, threshold stats, drift windows); `_integration` runs one
+full configuration end to end and checks the whole chain produces sane,
+non-degenerate output.
 
 ## Troubleshooting
 

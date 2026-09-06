@@ -71,6 +71,7 @@ class Evaluator:
         p_prob: np.ndarray,
         threshold: float = 0.5,
         meta: Optional[Dict[str, Any]] = None,
+        y_pred: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         """Compute sample-level metrics according to the D6 specification.
 
@@ -81,9 +82,18 @@ class Evaluator:
         p_prob : np.ndarray
             Predicted attack probabilities, shape (n,).
         threshold : float
-            Decision threshold for binary classification.
+            Decision threshold for binary classification. Also the value
+            recorded in the D6 row.
         meta : dict, optional
             Metadata fields to populate in the D6 schema (dataset, method, config, etc.).
+        y_pred : np.ndarray, optional
+            Precomputed binary predictions. Methods whose decision rule is not a
+            single global cut -- Saurabh's per-window adaptive threshold, the
+            proposed FPR-constrained threshold -- must pass their own
+            `model.predict(...)` here, otherwise re-thresholding `p_prob` would
+            silently discard the very mechanism being evaluated. `threshold` is
+            then only the representative value reported in the D6 row;
+            ROC-AUC still comes from `p_prob`.
 
         Returns
         -------
@@ -93,7 +103,13 @@ class Evaluator:
         y_true = np.asarray(y_true).ravel()
         p_prob = np.asarray(p_prob).ravel()
 
-        y_pred = (p_prob >= threshold).astype(int)
+        if y_pred is None:
+            y_pred = (p_prob >= threshold).astype(int)
+        else:
+            y_pred = np.asarray(y_pred).ravel().astype(int)
+            if len(y_pred) != len(y_true):
+                raise ValueError(
+                    f"y_pred has {len(y_pred)} rows but y_true has {len(y_true)}")
 
         # Confusion Matrix
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
@@ -182,6 +198,7 @@ class Evaluator:
         window_size: int = 500,
         block_ids: Optional[np.ndarray] = None,
         thresholds: Optional[Union[float, List[float], np.ndarray]] = None,
+        y_pred: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         """Compute window-level metrics (FPR mean/var/max, threshold std) inside blocks.
 
@@ -197,6 +214,10 @@ class Evaluator:
             Block identifier per sample to keep windows inside contiguous blocks.
         thresholds : float or list of floats, optional
             Per-window threshold array or single static threshold.
+        y_pred : np.ndarray, optional
+            Precomputed sample-level predictions. Pass these for methods with a
+            per-window decision rule so the window FPRs match the headline
+            numbers instead of being recomputed from a single cut.
 
         Returns
         -------
@@ -205,6 +226,8 @@ class Evaluator:
         """
         y_true = np.asarray(y_true).ravel()
         p_prob = np.asarray(p_prob).ravel()
+        if y_pred is not None:
+            y_pred = np.asarray(y_pred).ravel().astype(int)
 
         if block_ids is None:
             block_ids = np.zeros(len(y_true), dtype=int)
@@ -238,7 +261,10 @@ class Evaluator:
                     else:
                         t = float(thresholds[-1])
 
-                w_pred = (w_p >= t).astype(int)
+                if y_pred is not None:
+                    w_pred = y_pred[mask][start:end]
+                else:
+                    w_pred = (w_p >= t).astype(int)
                 cm = confusion_matrix(w_y, w_pred, labels=[0, 1])
                 tn, fp, fn, tp = cm.ravel()
 

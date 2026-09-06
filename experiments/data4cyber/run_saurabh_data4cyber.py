@@ -41,8 +41,13 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from src.common.data.data4cyber_adapter import Data4CyberAdapter
-from src.saurabh.saurabh_xgboost import SaurabhXGBoost
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+
+from common.data.data4cyber_adapter import Data4CyberAdapter  # noqa: E402
+from saurabh.saurabh_xgboost import SaurabhXGBoost  # noqa: E402
 
 
 # ---------------------------------------------------------------------

@@ -463,7 +463,83 @@ finding, not a failure.
 
 ---
 
+## Non-stationary traffic (faculty direction 5)
+
+`experiments/ncsrd/run_nonstationary.py` generates synthetic **benign** traffic
+variations and measures the false-alarm rate over 1,003 sliding windows of 500
+samples. Every row is benign, so FPR is the false-alarm rate directly.
+
+Measured on the NCSRD project-standard split (static / frozen baseline):
+
+| profile | FPR mean | FPR variance | FPR max |
+|---|---:|---:|---:|
+| stable (control) | 0.0010 | 0.000098 | 0.132 |
+| gradual drift | 0.0036 | 0.000262 | 0.132 |
+| bursty mMTC | 0.0135 | 0.001880 | 0.370 |
+| periodic URLLC | 0.0467 | 0.021684 | 0.800 |
+
+This **confirms the premise of the faculty brief**: a static benign correlation
+baseline degrades badly once normal traffic changes shape — FPR variance rises
+221x and worst-case FPR reaches 0.80 under periodic URLLC. It also shows our
+EWMA implementation does not currently rescue it (see the known limitation
+below); the streaming baseline is worse on every profile. Detection latency is
+0.0012–0.011 ms/sample throughout, comfortably inside the brief's sub-100 ms
+target.
+
+---
+
 ## Known limitations to state in the report
+
+* **The proposed online correlation baseline does not influence classification,
+  and cannot with this architecture.** The faculty brief asks for the static
+  benign correlation matrix to be *replaced* by an adapting EWMA baseline. EWMA
+  and CUSUM are implemented and do run (47 updates / 24 change points on NCSRD),
+  but `predict_proba` scores against `fitted_ewma_`, frozen at the end of
+  training, so the adapted state never reaches the classifier.
+
+  Two candidate fixes were implemented and measured, and **both are far worse**:
+
+  | configuration | NCSRD F1 | FPR |
+  |---|---:|---:|
+  | train static / serve frozen *(current default)* | **0.9792** | 0.0009 |
+  | train static / serve streaming | 0.2002 | 0.4608 |
+  | train adaptive / serve frozen | 0.0827 | 0.0003 |
+  | train adaptive / serve streaming | 0.0016 | 0.2119 |
+
+  The cause is structural, not a bug and not leakage. The Frobenius divergence
+  is only informative *against a fixed reference*; once the baseline chases the
+  data, divergence collapses toward zero for benign and attack windows alike and
+  the 50th feature stops carrying signal. Freezing the baseline is what makes
+  the feature work.
+
+  So the requirement is met in mechanism (EWMA/CUSUM exist, run, and are gated
+  on predictions rather than labels) but **not in effect** — the adaptation does
+  not change detections. Making it effective needs a different architecture, for
+  example using the adapting baseline for a standalone drift alarm rather than
+  as a classifier input. That is future work, not a fix.
+  `predict_proba_streaming()` and `_build_adaptive_training_features()` are kept
+  so both experiments stay reproducible. Report this honestly.
+* **On the project-standard split, Proposed (P6) and Saurabh produce identical
+  test predictions.** Verified directly: their `predict_proba` outputs match to
+  0.0, and Saurabh's global threshold (0.5700) and the proposed constrained
+  threshold (0.57) coincide, so the confusion matrices are identical. P6 keeps a
+  Saurabh backbone and its EWMA / CUSUM / fast-SHAP modules change adaptation and
+  latency, not the probability ranking on this data. Report the two rows as they
+  are and argue the proposed contribution on the operational axes (FPR
+  stability, drift adaptation, SHAP latency, distilled model size) rather than on
+  F1 — do not present them as separate detection results.
+* **Saurabh's per-window threshold is nearly static here**: only 2 distinct
+  window thresholds across the NCSRD validation windows, so Module B behaves
+  close to a global cut on this split. His paper reports thresholds spanning
+  [0.04, 0.95] across 848 windows, because he re-optimises F1 on each window's
+  own labels; we fit thresholds on validation and apply them cyclically to test
+  windows so no test label is used (D5). The leakage-safe choice costs most of
+  the adaptivity.
+* **Our Saurabh configuration is not a literal reproduction.** His paper
+  specifies `n_estimators=300` on SMOTE-balanced data; we use `n_estimators=1000`
+  with early stopping and `scale_pos_weight`, on the project-standard split.
+  Deliberate, but it means the published 0.9573 / 0.9730 are not directly
+  comparable to our numbers.
 
 Deliberately not "fixed", because fixing them would break reproduction:
 
