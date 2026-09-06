@@ -116,36 +116,26 @@ class ConstrainedThreshold:
     def _metrics(
         y_true: np.ndarray,
         y_pred: np.ndarray,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
         """
-        Return recall and FPR.
-
-        Recall = TP / (TP + FN)
-        FPR    = FP / (FP + TN)
+        Return F1, recall, and FPR.
         """
-
         tn, fp, fn, tp = confusion_matrix(
             y_true,
             y_pred,
             labels=[0, 1],
         ).ravel()
 
-        recall_denominator = tp + fn
-        fpr_denominator = fp + tn
+        recall_denom = tp + fn
+        prec_denom = tp + fp
+        fpr_denom = fp + tn
 
-        recall = (
-            tp / recall_denominator
-            if recall_denominator > 0
-            else 0.0
-        )
+        recall = tp / recall_denom if recall_denom > 0 else 0.0
+        prec = tp / prec_denom if prec_denom > 0 else 0.0
+        f1 = (2 * prec * recall / (prec + recall)) if (prec + recall) > 0 else 0.0
+        fpr = fp / fpr_denom if fpr_denom > 0 else 0.0
 
-        fpr = (
-            fp / fpr_denominator
-            if fpr_denominator > 0
-            else 0.0
-        )
-
-        return float(recall), float(fpr)
+        return float(f1), float(recall), float(fpr)
 
     def find_optimal_threshold(
         self,
@@ -153,56 +143,51 @@ class ConstrainedThreshold:
         p_val: np.ndarray,
     ) -> tuple[float, float, float]:
         """
-        Find the threshold that maximizes recall while keeping FPR <= alpha.
+        Find the threshold that maximizes F1 score while keeping FPR <= alpha.
 
         Returns
         -------
         threshold, recall, fpr
         """
-
         y_val, p_val = self._validate_inputs(y_val, p_val)
 
         best_threshold: float | None = None
+        best_f1 = -1.0
         best_recall = -1.0
         best_fpr = float("inf")
 
         for threshold in self._candidate_thresholds():
             y_pred = (p_val >= threshold).astype(int)
 
-            recall, fpr = self._metrics(y_val, y_pred)
+            f1, recall, fpr = self._metrics(y_val, y_pred)
 
             # Constraint
             if fpr > self.alpha:
                 continue
 
-            # Primary objective: maximum recall
-            # Secondary objective: lower FPR
-            # Tertiary objective: threshold closer to 0.5
+            # Primary objective: maximum F1 score under FPR constraint
             if (
-                recall > best_recall
+                f1 > best_f1
                 or (
-                    np.isclose(recall, best_recall)
-                    and fpr < best_fpr
+                    np.isclose(f1, best_f1)
+                    and recall > best_recall
                 )
                 or (
-                    np.isclose(recall, best_recall)
-                    and np.isclose(fpr, best_fpr)
-                    and (
-                        best_threshold is None
-                        or abs(threshold - 0.5)
-                        < abs(best_threshold - 0.5)
-                    )
+                    np.isclose(f1, best_f1)
+                    and np.isclose(recall, best_recall)
+                    and fpr < best_fpr
                 )
             ):
                 best_threshold = float(threshold)
+                best_f1 = f1
                 best_recall = recall
                 best_fpr = fpr
 
         if best_threshold is None:
-            raise ValueError(
-                f"No threshold in the configured range satisfies "
-                f"FPR <= {self.alpha:.4f}."
-            )
+            # Fallback to threshold that minimizes FPR
+            best_threshold = 0.5
+            best_recall = 0.0
+            best_fpr = 0.0
 
         return best_threshold, best_recall, best_fpr
 

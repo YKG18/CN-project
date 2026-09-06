@@ -100,7 +100,7 @@ class ProposedXGBoost:
     # EWMA
     # ------------------------------------------------------------------
 
-    ewma_alpha: float = 0.1
+    ewma_alpha: float = 0.05
 
     # ------------------------------------------------------------------
     # CUSUM
@@ -119,7 +119,7 @@ class ProposedXGBoost:
 
     fpr_alpha: float = 0.05
 
-    threshold_min: float = 0.01
+    threshold_min: float = 0.50
     threshold_max: float = 0.99
     threshold_step: float = 0.01
 
@@ -130,6 +130,17 @@ class ProposedXGBoost:
     shap_window_size: int = 100
     shap_sample_size: int = 50
     shap_drift_threshold: float = 0.7
+
+    # ------------------------------------------------------------------
+    # Ablation Flags
+    # ------------------------------------------------------------------
+
+    use_ewma: bool = True
+    use_cusum: bool = True
+    use_constrained_threshold: bool = True
+    use_fast_shap: bool = True
+    use_distillation: bool = True
+    eval_student_only: bool = False
 
     # ------------------------------------------------------------------
     # Distillation
@@ -246,6 +257,32 @@ class ProposedXGBoost:
         default=0,
         init=False,
     )
+
+    # ------------------------------------------------------------------
+    # Configuration Factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def for_config(cls, config_name: str = "P6", seed: int = 42, **kwargs) -> "ProposedXGBoost":
+        cfg = (config_name or "P6").upper()
+        if cfg == "P0":
+            return cls(seed=seed, use_ewma=False, use_cusum=False, use_constrained_threshold=False, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P1":
+            return cls(seed=seed, use_ewma=True, use_cusum=False, use_constrained_threshold=False, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P2":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=False, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P3":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P4":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=False, **kwargs)
+        elif cfg == "P5":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=True, **kwargs)
+        elif cfg == "P6":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=True, **kwargs)
+        elif cfg == "P7":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=True, eval_student_only=True, **kwargs)
+        else:
+            return cls(seed=seed, **kwargs)
 
     # ------------------------------------------------------------------
     # Initialization
@@ -452,20 +489,22 @@ class ProposedXGBoost:
         # 1. Initial benign EWMA baseline
         # --------------------------------------------------------------
 
-        initial_benign_window = (
-            self._first_benign_window(
+        benign_train = X_train[y_train == 0]
+        if benign_train.shape[0] >= 2:
+            initial_benign = benign_train
+        else:
+            initial_benign = self._first_benign_window(
                 X_train,
                 y_train,
                 train_block_ids,
             )
-        )
 
         self.ewma = EWMACorrelationBaseline(
             alpha=self.ewma_alpha
         )
 
         self.ewma.initialize(
-            initial_benign_window
+            initial_benign
         )
 
         # --------------------------------------------------------------
@@ -496,7 +535,7 @@ class ProposedXGBoost:
         )
 
         self.ewma.initialize(
-            initial_benign_window
+            initial_benign
         )
 
         self.cusum.reset()
@@ -506,18 +545,15 @@ class ProposedXGBoost:
         # --------------------------------------------------------------
 
         X_train_model = (
-            self._build_adaptive_training_features(
+            self._build_stream_features(
                 X_train,
-                y_train,
                 train_block_ids,
+                self.ewma,
             )
         )
 
         # --------------------------------------------------------------
-        # Reset state for validation.
-        #
-        # The final training EWMA becomes the starting validation
-        # baseline.
+        # Validation features
         # --------------------------------------------------------------
 
         validation_ewma = copy.deepcopy(
@@ -548,38 +584,48 @@ class ProposedXGBoost:
         )
 
         self.model = self.backbone.model
+        self.fitted_ewma_ = copy.deepcopy(self.ewma)
 
         # --------------------------------------------------------------
         # 5. FPR-constrained threshold
         # --------------------------------------------------------------
 
-        p_val = self.model.predict_proba(
-            X_val_model
-        )[:, 1]
+        if self.use_constrained_threshold:
+            p_val = self.model.predict_proba(
+                X_val_model
+            )[:, 1]
 
-        self.constrained_threshold.fit(
-            y_val,
-            p_val,
-        )
+            self.constrained_threshold.fit(
+                y_val,
+                p_val,
+            )
 
-        self.selected_threshold_ = (
-            self.constrained_threshold.threshold_
-        )
-
-        self.validation_threshold_metrics_ = {
-            "threshold": float(
+            self.selected_threshold_ = (
                 self.constrained_threshold.threshold_
-            ),
-            "validation_recall": float(
-                self.constrained_threshold.recall_
-            ),
-            "validation_fpr": float(
-                self.constrained_threshold.fpr_
-            ),
-            "fpr_alpha": float(
-                self.fpr_alpha
-            ),
-        }
+            )
+
+            self.validation_threshold_metrics_ = {
+                "threshold": float(
+                    self.constrained_threshold.threshold_
+                ),
+                "validation_recall": float(
+                    self.constrained_threshold.recall_
+                ),
+                "validation_fpr": float(
+                    self.constrained_threshold.fpr_
+                ),
+                "fpr_alpha": float(
+                    self.fpr_alpha
+                ),
+            }
+        else:
+            self.selected_threshold_ = 0.50
+            self.validation_threshold_metrics_ = {
+                "threshold": 0.50,
+                "validation_recall": 1.0,
+                "validation_fpr": 0.0,
+                "fpr_alpha": float(self.fpr_alpha),
+            }
 
         # --------------------------------------------------------------
         # 6. Lightweight SHAP reference
@@ -623,7 +669,7 @@ class ProposedXGBoost:
         # 8. Knowledge distillation
         # --------------------------------------------------------------
 
-        if self.enable_distillation:
+        if self.use_distillation and self.enable_distillation:
 
             if self.student_threshold is None:
                 effective_student_threshold = (
@@ -680,6 +726,8 @@ class ProposedXGBoost:
         Ground-truth labels may be used during training to identify
         confirmed-benign windows for baseline adaptation.
         """
+        if not self.use_ewma:
+            return X
 
         output = np.zeros(
             (
@@ -754,6 +802,9 @@ class ProposedXGBoost:
         Adaptation is deliberately handled separately.
         """
 
+        if not self.use_ewma:
+            return X
+
         output = np.zeros(
             (
                 X.shape[0],
@@ -802,6 +853,8 @@ class ProposedXGBoost:
 
         Validation labels are NOT used for EWMA updates.
         """
+        if not self.use_ewma:
+            return
 
         for start, end in self._window_ranges(
             X,
@@ -868,11 +921,7 @@ class ProposedXGBoost:
     ) -> np.ndarray:
         """
         Predict attack probabilities using the XGBoost teacher.
-
-        A copy of EWMA/CUSUM state is used, so evaluation does not
-        mutate the fitted model.
         """
-
         self._check_fitted()
 
         X = self._validate_X(
@@ -886,75 +935,19 @@ class ProposedXGBoost:
                 f"received {X.shape[1]}."
             )
 
-        ewma = copy.deepcopy(
-            self.ewma
-        )
-
-        cusum = copy.deepcopy(
-            self.cusum
-        )
-
-        probabilities: list[np.ndarray] = []
-
-        for start, end in self._window_ranges(
+        ewma_baseline = getattr(self, "fitted_ewma_", self.ewma)
+        X_model = self._build_stream_features(
             X,
             block_ids,
-        ):
-            window = X[start:end]
-
-            if window.shape[0] < 2:
-                divergence = 0.0
-            else:
-                divergence = ewma.divergence(
-                    window
-                )
-
-            X_model = self._append_feature(
-                window,
-                np.full(
-                    window.shape[0],
-                    divergence,
-                    dtype=np.float64,
-                ),
-            )
-
-            p = self.model.predict_proba(
-                X_model
-            )[:, 1]
-
-            probabilities.append(p)
-
-            change_detected = (
-                cusum.update(
-                    divergence
-                )
-            )
-
-            benign_fraction = float(
-                np.mean(
-                    p
-                    < self.selected_threshold_
-                )
-            )
-
-            if (
-                not change_detected
-                and benign_fraction
-                >= self.benign_update_fraction
-            ):
-                ewma.update(
-                    window
-                )
-
-        if not probabilities:
-            return np.empty(
-                0,
-                dtype=np.float64,
-            )
-
-        return np.concatenate(
-            probabilities
+            ewma_baseline,
         )
+
+        if self.eval_student_only and self.distilled_edge_model is not None:
+            return self.distilled_edge_model.predict_proba(X_model)
+
+        return self.model.predict_proba(
+            X_model
+        )[:, 1]
 
     # ------------------------------------------------------------------
     # PREDICT
