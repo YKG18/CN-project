@@ -36,9 +36,9 @@
     "threshold_selected_on": "validation_constrained",
     "n_train": 296846,
     "n_test": 86062,
-    "inference_latency_ms": 0.001693,
+    "inference_latency_ms": 0.001976,
     "model_size_kb": 0.0,
-    "notes": "Proposed XGBoost pipeline (train_time=88.43s)"
+    "notes": "Proposed XGBoost pipeline (train_time=115.89s)"
   },
   "window_metrics": {
     "n_windows": 130,

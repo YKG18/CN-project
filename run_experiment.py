@@ -202,7 +202,8 @@ def run_proposed_experiment(args: argparse.Namespace) -> Dict[str, Any]:
     config_name = args.config or "P6"
     bundle, feature_set = load_bundle_for_dataset(args, feature_set="saurabh49", balance="class_weight")
 
-    model = ProposedXGBoost(
+    model = ProposedXGBoost.for_config(
+        config_name=config_name,
         seed=args.seed,
     )
 

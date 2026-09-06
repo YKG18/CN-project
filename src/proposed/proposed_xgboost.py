@@ -132,6 +132,17 @@ class ProposedXGBoost:
     shap_drift_threshold: float = 0.7
 
     # ------------------------------------------------------------------
+    # Ablation Flags
+    # ------------------------------------------------------------------
+
+    use_ewma: bool = True
+    use_cusum: bool = True
+    use_constrained_threshold: bool = True
+    use_fast_shap: bool = True
+    use_distillation: bool = True
+    eval_student_only: bool = False
+
+    # ------------------------------------------------------------------
     # Distillation
     # ------------------------------------------------------------------
 
@@ -246,6 +257,32 @@ class ProposedXGBoost:
         default=0,
         init=False,
     )
+
+    # ------------------------------------------------------------------
+    # Configuration Factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def for_config(cls, config_name: str = "P6", seed: int = 42, **kwargs) -> "ProposedXGBoost":
+        cfg = (config_name or "P6").upper()
+        if cfg == "P0":
+            return cls(seed=seed, use_ewma=False, use_cusum=False, use_constrained_threshold=False, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P1":
+            return cls(seed=seed, use_ewma=True, use_cusum=False, use_constrained_threshold=False, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P2":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=False, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P3":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=False, use_distillation=False, **kwargs)
+        elif cfg == "P4":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=False, **kwargs)
+        elif cfg == "P5":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=True, **kwargs)
+        elif cfg == "P6":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=True, **kwargs)
+        elif cfg == "P7":
+            return cls(seed=seed, use_ewma=True, use_cusum=True, use_constrained_threshold=True, use_fast_shap=True, use_distillation=True, eval_student_only=True, **kwargs)
+        else:
+            return cls(seed=seed, **kwargs)
 
     # ------------------------------------------------------------------
     # Initialization
@@ -553,33 +590,42 @@ class ProposedXGBoost:
         # 5. FPR-constrained threshold
         # --------------------------------------------------------------
 
-        p_val = self.model.predict_proba(
-            X_val_model
-        )[:, 1]
+        if self.use_constrained_threshold:
+            p_val = self.model.predict_proba(
+                X_val_model
+            )[:, 1]
 
-        self.constrained_threshold.fit(
-            y_val,
-            p_val,
-        )
+            self.constrained_threshold.fit(
+                y_val,
+                p_val,
+            )
 
-        self.selected_threshold_ = (
-            self.constrained_threshold.threshold_
-        )
-
-        self.validation_threshold_metrics_ = {
-            "threshold": float(
+            self.selected_threshold_ = (
                 self.constrained_threshold.threshold_
-            ),
-            "validation_recall": float(
-                self.constrained_threshold.recall_
-            ),
-            "validation_fpr": float(
-                self.constrained_threshold.fpr_
-            ),
-            "fpr_alpha": float(
-                self.fpr_alpha
-            ),
-        }
+            )
+
+            self.validation_threshold_metrics_ = {
+                "threshold": float(
+                    self.constrained_threshold.threshold_
+                ),
+                "validation_recall": float(
+                    self.constrained_threshold.recall_
+                ),
+                "validation_fpr": float(
+                    self.constrained_threshold.fpr_
+                ),
+                "fpr_alpha": float(
+                    self.fpr_alpha
+                ),
+            }
+        else:
+            self.selected_threshold_ = 0.50
+            self.validation_threshold_metrics_ = {
+                "threshold": 0.50,
+                "validation_recall": 1.0,
+                "validation_fpr": 0.0,
+                "fpr_alpha": float(self.fpr_alpha),
+            }
 
         # --------------------------------------------------------------
         # 6. Lightweight SHAP reference
@@ -623,7 +669,7 @@ class ProposedXGBoost:
         # 8. Knowledge distillation
         # --------------------------------------------------------------
 
-        if self.enable_distillation:
+        if self.use_distillation and self.enable_distillation:
 
             if self.student_threshold is None:
                 effective_student_threshold = (
@@ -680,6 +726,8 @@ class ProposedXGBoost:
         Ground-truth labels may be used during training to identify
         confirmed-benign windows for baseline adaptation.
         """
+        if not self.use_ewma:
+            return X
 
         output = np.zeros(
             (
@@ -754,6 +802,9 @@ class ProposedXGBoost:
         Adaptation is deliberately handled separately.
         """
 
+        if not self.use_ewma:
+            return X
+
         output = np.zeros(
             (
                 X.shape[0],
@@ -802,6 +853,8 @@ class ProposedXGBoost:
 
         Validation labels are NOT used for EWMA updates.
         """
+        if not self.use_ewma:
+            return
 
         for start, end in self._window_ranges(
             X,
@@ -888,6 +941,9 @@ class ProposedXGBoost:
             block_ids,
             ewma_baseline,
         )
+
+        if self.eval_student_only and self.distilled_edge_model is not None:
+            return self.distilled_edge_model.predict_proba(X_model)
 
         return self.model.predict_proba(
             X_model
