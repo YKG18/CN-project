@@ -188,14 +188,64 @@ def run_saurabh_experiment(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def run_proposed_experiment(args: argparse.Namespace) -> Dict[str, Any]:
-    config_name = args.config or "P6"
-    print(f"[Proposed] Running proposed experiment config '{config_name}'...")
+    from ncsrd_adapter import NetworkDataAdapter
+    from proposed.proposed_xgboost import ProposedXGBoost
 
-    # Leverage Saurabh pipeline as anchor base with EWMA / FPR-constrained extensions
-    res = run_saurabh_experiment(args)
-    res["d6_row"]["method"] = "proposed"
-    res["d6_row"]["config"] = config_name
-    res["d6_row"]["notes"] = f"Proposed method baseline config {config_name}"
+    feature_set = "saurabh49"
+    config_name = args.config or "P6"
+
+    adapter = NetworkDataAdapter.for_feature_set(feature_set)
+    adapter.load_split(config.SPLIT_INDEX_FILE)
+    bundle = adapter.for_xgboost(balance="class_weight")
+
+    model = ProposedXGBoost(
+        seed=args.seed,
+    )
+
+    t0 = time.perf_counter()
+    model.fit(
+        bundle.X_train,
+        bundle.y_train,
+        bundle.X_val,
+        bundle.y_val,
+        block_ids_train=getattr(bundle, "train_block", None),
+        block_ids_val=getattr(bundle, "val_block", None),
+    )
+    train_time = time.perf_counter() - t0
+
+    t1 = time.perf_counter()
+    p_test = model.predict_proba(bundle.X_test, block_ids=getattr(bundle, "test_block", None))
+    inf_time_sec = time.perf_counter() - t1
+
+    n_test = len(bundle.y_test)
+    inf_latency_ms = (inf_time_sec / n_test) * 1000.0 if n_test > 0 else 0.0
+    model_size_kb = get_model_size_kb(model)
+
+    tau = getattr(model, "selected_threshold_", 0.5)
+
+    meta = {
+        "dataset": args.dataset,
+        "method": "proposed",
+        "config": config_name,
+        "feature_set": feature_set,
+        "split_policy": args.split_policy,
+        "seed": args.seed,
+        "threshold_selected_on": "validation_constrained",
+        "n_train": len(bundle.y_train),
+        "n_test": n_test,
+        "inference_latency_ms": round(inf_latency_ms, 6),
+        "model_size_kb": model_size_kb,
+        "notes": f"Proposed XGBoost pipeline (train_time={train_time:.2f}s)",
+    }
+
+    evaluator = Evaluator()
+    res = evaluator.evaluate_predictions(bundle.y_test, p_test, threshold=tau, meta=meta)
+
+    block_ids = getattr(bundle, "test_block", None)
+    w_metrics = evaluator.evaluate_windows(
+        bundle.y_test, p_test, window_size=500, block_ids=block_ids, thresholds=tau
+    )
+    res["window_metrics"] = w_metrics
     return res
 
 
