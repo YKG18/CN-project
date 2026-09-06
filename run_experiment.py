@@ -145,8 +145,8 @@ def run_saurabh_experiment(args: argparse.Namespace) -> Dict[str, Any]:
         bundle.y_train,
         bundle.X_val,
         bundle.y_val,
-        block_ids_train=getattr(bundle, "train_block", None),
-        block_ids_val=getattr(bundle, "val_block", None),
+        train_block_ids=getattr(bundle, "train_block", None),
+        val_block_ids=getattr(bundle, "val_block", None),
     )
     train_time = time.perf_counter() - t0
 
@@ -208,8 +208,8 @@ def run_proposed_experiment(args: argparse.Namespace) -> Dict[str, Any]:
         bundle.y_train,
         bundle.X_val,
         bundle.y_val,
-        block_ids_train=getattr(bundle, "train_block", None),
-        block_ids_val=getattr(bundle, "val_block", None),
+        train_block_ids=getattr(bundle, "train_block", None),
+        val_block_ids=getattr(bundle, "val_block", None),
     )
     train_time = time.perf_counter() - t0
 

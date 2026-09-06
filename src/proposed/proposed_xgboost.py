@@ -100,7 +100,7 @@ class ProposedXGBoost:
     # EWMA
     # ------------------------------------------------------------------
 
-    ewma_alpha: float = 0.1
+    ewma_alpha: float = 0.05
 
     # ------------------------------------------------------------------
     # CUSUM
@@ -119,7 +119,7 @@ class ProposedXGBoost:
 
     fpr_alpha: float = 0.05
 
-    threshold_min: float = 0.01
+    threshold_min: float = 0.50
     threshold_max: float = 0.99
     threshold_step: float = 0.01
 
@@ -452,20 +452,22 @@ class ProposedXGBoost:
         # 1. Initial benign EWMA baseline
         # --------------------------------------------------------------
 
-        initial_benign_window = (
-            self._first_benign_window(
+        benign_train = X_train[y_train == 0]
+        if benign_train.shape[0] >= 2:
+            initial_benign = benign_train
+        else:
+            initial_benign = self._first_benign_window(
                 X_train,
                 y_train,
                 train_block_ids,
             )
-        )
 
         self.ewma = EWMACorrelationBaseline(
             alpha=self.ewma_alpha
         )
 
         self.ewma.initialize(
-            initial_benign_window
+            initial_benign
         )
 
         # --------------------------------------------------------------
@@ -496,7 +498,7 @@ class ProposedXGBoost:
         )
 
         self.ewma.initialize(
-            initial_benign_window
+            initial_benign
         )
 
         self.cusum.reset()
@@ -506,18 +508,15 @@ class ProposedXGBoost:
         # --------------------------------------------------------------
 
         X_train_model = (
-            self._build_adaptive_training_features(
+            self._build_stream_features(
                 X_train,
-                y_train,
                 train_block_ids,
+                self.ewma,
             )
         )
 
         # --------------------------------------------------------------
-        # Reset state for validation.
-        #
-        # The final training EWMA becomes the starting validation
-        # baseline.
+        # Validation features
         # --------------------------------------------------------------
 
         validation_ewma = copy.deepcopy(
@@ -548,6 +547,7 @@ class ProposedXGBoost:
         )
 
         self.model = self.backbone.model
+        self.fitted_ewma_ = copy.deepcopy(self.ewma)
 
         # --------------------------------------------------------------
         # 5. FPR-constrained threshold
@@ -868,11 +868,7 @@ class ProposedXGBoost:
     ) -> np.ndarray:
         """
         Predict attack probabilities using the XGBoost teacher.
-
-        A copy of EWMA/CUSUM state is used, so evaluation does not
-        mutate the fitted model.
         """
-
         self._check_fitted()
 
         X = self._validate_X(
@@ -886,75 +882,16 @@ class ProposedXGBoost:
                 f"received {X.shape[1]}."
             )
 
-        ewma = copy.deepcopy(
-            self.ewma
-        )
-
-        cusum = copy.deepcopy(
-            self.cusum
-        )
-
-        probabilities: list[np.ndarray] = []
-
-        for start, end in self._window_ranges(
+        ewma_baseline = getattr(self, "fitted_ewma_", self.ewma)
+        X_model = self._build_stream_features(
             X,
             block_ids,
-        ):
-            window = X[start:end]
-
-            if window.shape[0] < 2:
-                divergence = 0.0
-            else:
-                divergence = ewma.divergence(
-                    window
-                )
-
-            X_model = self._append_feature(
-                window,
-                np.full(
-                    window.shape[0],
-                    divergence,
-                    dtype=np.float64,
-                ),
-            )
-
-            p = self.model.predict_proba(
-                X_model
-            )[:, 1]
-
-            probabilities.append(p)
-
-            change_detected = (
-                cusum.update(
-                    divergence
-                )
-            )
-
-            benign_fraction = float(
-                np.mean(
-                    p
-                    < self.selected_threshold_
-                )
-            )
-
-            if (
-                not change_detected
-                and benign_fraction
-                >= self.benign_update_fraction
-            ):
-                ewma.update(
-                    window
-                )
-
-        if not probabilities:
-            return np.empty(
-                0,
-                dtype=np.float64,
-            )
-
-        return np.concatenate(
-            probabilities
+            ewma_baseline,
         )
+
+        return self.model.predict_proba(
+            X_model
+        )[:, 1]
 
     # ------------------------------------------------------------------
     # PREDICT

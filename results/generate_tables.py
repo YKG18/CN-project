@@ -49,8 +49,11 @@ def generate_3x2_matrix(results: List[Dict[str, Any]]) -> str:
     rows = []
 
     for m in methods:
-        ncsrd_row = next((r for r in results if r.get("method") == m and r.get("dataset") == "ncsrd"), None)
-        d4c_row = next((r for r in results if r.get("method") == m and r.get("dataset") == "data4cyber"), None)
+        ncsrd_matches = [r for r in results if r.get("method") == m and r.get("dataset") == "ncsrd"]
+        d4c_matches = [r for r in results if r.get("method") == m and r.get("dataset") == "data4cyber"]
+
+        ncsrd_row = ncsrd_matches[-1] if ncsrd_matches else None
+        d4c_row = d4c_matches[-1] if d4c_matches else None
 
         ncsrd_f1 = f"{float(ncsrd_row['f1']):.4f}" if ncsrd_row else "TBD"
         ncsrd_fpr = f"{float(ncsrd_row['fpr']):.4f}" if ncsrd_row else "TBD"
@@ -72,7 +75,8 @@ def generate_ablation_table(results: List[Dict[str, Any]]) -> str:
     rows = []
 
     for p_id in ablation_ids:
-        row_data = next((r for r in results if r.get("config") == p_id), None)
+        matches = [r for r in results if r.get("config") == p_id]
+        row_data = matches[-1] if matches else None
         if row_data:
             f1 = f"{float(row_data['f1']):.4f}"
             fpr = f"{float(row_data['fpr']):.4f}"
@@ -83,8 +87,7 @@ def generate_ablation_table(results: List[Dict[str, Any]]) -> str:
         else:
             f1 = fpr = prec = rec = lat = size = "TBD"
 
-        config_name = f"Ablation {p_id}"
-        rows.append(f"| **{p_id}** | {config_name} | {f1} | {fpr} | {prec} | {rec} | {lat} | {size} |")
+        rows.append(f"| **{p_id}** | Ablation {p_id} | {f1} | {fpr} | {prec} | {rec} | {lat} | {size} |")
 
     return header + "\n".join(rows) + "\n"
 
