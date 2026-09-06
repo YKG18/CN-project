@@ -1,19 +1,15 @@
 """
-Saurabh Methodology - Integrated XGBoost Pipeline for Data4Cyber.
+Saurabh Methodology - Integrated XGBoost Pipeline.
 
 Single-file implementation combining:
 
 Module A — Correlation Behavioural Graph
-    Builds a static benign Pearson-correlation baseline from TRAINING data
-    and appends graph_frob_div as an additional feature.
-
 Module B — Dynamic Adaptive Threshold
-    Learns classification thresholds from VALIDATION probabilities and labels
-    only. Test labels are never used for threshold selection.
-
 Module C — SHAP Drift Detection
-    Learns a reference SHAP feature-importance ranking from TRAINING data
-    and detects ranking drift in later windows without using their labels.
+
+The pipeline is dataset-agnostic. Dataset-specific preprocessing,
+frozen splits, experiment configuration, and evaluation are handled
+by separate experiment runners.
 
 IMPORTANT SPLIT POLICY
 ----------------------
