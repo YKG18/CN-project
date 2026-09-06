@@ -62,19 +62,33 @@ def get_model_size_kb(model: Any) -> float:
     return 0.0
 
 
+def load_bundle_for_dataset(args: argparse.Namespace, feature_set: str = "saurabh49", balance: str = "class_weight"):
+    if args.dataset == "data4cyber":
+        from data4cyber_adapter import Data4CyberAdapter
+        adapter = Data4CyberAdapter(split_mode="block", verbose=True)
+        bundle = adapter.for_xgboost(balance=balance)
+        if hasattr(bundle, "meta") and isinstance(bundle.meta, dict):
+            bundle.train_block = bundle.meta.get("train_block")
+            bundle.val_block = bundle.meta.get("val_block")
+            bundle.test_block = bundle.meta.get("test_block")
+        actual_feature_set = f"data4cyber_{bundle.X_train.shape[1]}"
+        return bundle, actual_feature_set
+    else:
+        from ncsrd_adapter import NetworkDataAdapter
+        adapter = NetworkDataAdapter.for_feature_set(feature_set)
+        if args.split_policy == "project_standard":
+            adapter.load_split(config.SPLIT_INDEX_FILE)
+            bundle = adapter.for_xgboost(balance=balance)
+        else:
+            bundle = adapter.split(**config.BASE_REFERENCE_SPLIT)
+        return bundle, feature_set
+
+
 def run_base_experiment(args: argparse.Namespace) -> Dict[str, Any]:
     from base.base_xgboost import BaseXGBoost, select_threshold
-    from ncsrd_adapter import NetworkDataAdapter
 
-    feature_set = "base38"
     config_name = args.config or "base_paper"
-
-    adapter = NetworkDataAdapter.for_feature_set(feature_set)
-    if args.split_policy == "project_standard":
-        adapter.load_split(config.SPLIT_INDEX_FILE)
-        bundle = adapter.for_xgboost(balance="none")
-    else:
-        bundle = adapter.split(**config.BASE_REFERENCE_SPLIT)
+    bundle, feature_set = load_bundle_for_dataset(args, feature_set="base38", balance="none")
 
     model = BaseXGBoost(seed=args.seed)
 
@@ -122,15 +136,10 @@ def run_base_experiment(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def run_saurabh_experiment(args: argparse.Namespace) -> Dict[str, Any]:
-    from ncsrd_adapter import NetworkDataAdapter
     from saurabh.saurabh_xgboost import SaurabhXGBoost
 
-    feature_set = "saurabh49"
     config_name = args.config or "saurabh_full"
-
-    adapter = NetworkDataAdapter.for_feature_set(feature_set)
-    adapter.load_split(config.SPLIT_INDEX_FILE)
-    bundle = adapter.for_xgboost(balance="class_weight")
+    bundle, feature_set = load_bundle_for_dataset(args, feature_set="saurabh49", balance="class_weight")
 
     model = SaurabhXGBoost(
         seed=args.seed,
@@ -188,15 +197,10 @@ def run_saurabh_experiment(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def run_proposed_experiment(args: argparse.Namespace) -> Dict[str, Any]:
-    from ncsrd_adapter import NetworkDataAdapter
     from proposed.proposed_xgboost import ProposedXGBoost
 
-    feature_set = "saurabh49"
     config_name = args.config or "P6"
-
-    adapter = NetworkDataAdapter.for_feature_set(feature_set)
-    adapter.load_split(config.SPLIT_INDEX_FILE)
-    bundle = adapter.for_xgboost(balance="class_weight")
+    bundle, feature_set = load_bundle_for_dataset(args, feature_set="saurabh49", balance="class_weight")
 
     model = ProposedXGBoost(
         seed=args.seed,

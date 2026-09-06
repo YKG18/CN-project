@@ -1,10 +1,10 @@
 | ID | Configuration | F1 | FPR | Precision | Recall | Latency (ms) | Model Size (KB) |
 |---|---|---|---|---|---|---|---|
-| **P0** | Ablation P0 | TBD | TBD | TBD | TBD | TBD | TBD |
-| **P1** | Ablation P1 | TBD | TBD | TBD | TBD | TBD | TBD |
-| **P2** | Ablation P2 | TBD | TBD | TBD | TBD | TBD | TBD |
-| **P3** | Ablation P3 | TBD | TBD | TBD | TBD | TBD | TBD |
-| **P4** | Ablation P4 | TBD | TBD | TBD | TBD | TBD | TBD |
-| **P5** | Ablation P5 | TBD | TBD | TBD | TBD | TBD | TBD |
+| **P0** | Ablation P0 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0013 | 0.0 |
+| **P1** | Ablation P1 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0016 | 0.0 |
+| **P2** | Ablation P2 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0012 | 0.0 |
+| **P3** | Ablation P3 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0013 | 0.0 |
+| **P4** | Ablation P4 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0014 | 0.0 |
+| **P5** | Ablation P5 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0013 | 0.0 |
 | **P6** | Ablation P6 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0017 | 0.0 |
-| **P7** | Ablation P7 | TBD | TBD | TBD | TBD | TBD | TBD |
+| **P7** | Ablation P7 | 0.9825 | 0.0016 | 0.9768 | 0.9882 | 0.0019 | 0.0 |
