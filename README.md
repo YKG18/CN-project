@@ -100,6 +100,9 @@ python experiments/ncsrd/run_proposed.py
 
 # Non-stationary benign traffic (faculty direction 5)
 python experiments/ncsrd/run_nonstationary.py
+
+# Dual-divergence experiment (step C, experimental — not in the 3x2)
+python experiments/ncsrd/run_dual_divergence.py
 ```
 
 **Note on the Saurabh reproduction.** `run_saurabh.py` runs on the
@@ -140,9 +143,10 @@ src/
                           M2 — correlation graph, dynamic threshold, SHAP drift
   proposed/               M3 — proposed_xgboost.py + ewma, cusum,
                           constrained_threshold, fast_shap, distillation,
-                          nonstationary
+                          nonstationary, adaptive_threshold,
+                          dual_divergence
 experiments/ncsrd/        run_base.py, run_saurabh.py, run_proposed.py,
-                          run_nonstationary.py
+                          run_nonstationary.py, run_dual_divergence.py
 experiments/data4cyber/   run_base.py, run_saurabh_data4cyber.py
 results/{raw,tables,plots}/       M5 owns final result collection
 tests/                    test_pipeline.py, test_base.py, test_evaluator.py,

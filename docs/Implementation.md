@@ -51,8 +51,13 @@ a higher F1.
 | 11 | Edge / latency benchmark | M3 + M5 | partial — latency and model size are in the D6 row |
 | 12 | Plots, tables, report, demo | all | plots and tables in `results/` |
 
-All six matrix cells run. The remaining open items (phase 10, and power/CPU
-measurement in phase 11) are optional extras, not blockers for the report.
+All six matrix cells run. The remaining open item (power/CPU measurement in
+phase 11) is an optional extra, not a blocker for the report.
+
+Two opt-in experimental configurations sit outside the matrix and must stay
+outside it: the step-B threshold channel (`adaptive_threshold.py`, a measured
+negative result) and the step-C dual-divergence model
+(`dual_divergence.py`, a measured positive one).
 
 ---
 
@@ -131,13 +136,30 @@ Direction 5 lives in `src/proposed/nonstationary.py` +
 `experiments/ncsrd/run_nonstationary.py` and reports FPR stability over 1,003
 sliding windows.
 
-Two gaps remain, both documented in PROJECT_DECISIONS.md:
+On the **shipped P6 model** the online baseline runs but does not influence
+classification. Three routes to change that were implemented and measured; the
+first two fail and the third works. Full detail in PROJECT_DECISIONS.md.
 
-* the online baseline runs but does not influence classification, and measurement
-  shows it cannot with this architecture — the divergence feature only carries
-  signal against a fixed reference;
-* the FPR-constrained threshold is fitted once on validation rather than
-  re-solved per window as the brief describes.
+The two that fail:
+
+* as a classifier *feature* — fails on a 0.91 sd train/serve scale shift (not
+  on signal loss; the adaptive divergence is the *more* discriminative of the
+  two);
+* as a drift-driven *threshold* (`src/proposed/adaptive_threshold.py`, step B)
+  — the pooled form is inert, and the per-window form the brief describes cuts
+  FPR variance 192x but drops recall 0.9728 → 0.6047.
+
+The threshold route is blocked by a property of the data: high-alarm windows
+are 92.3% genuine attacks on the real split and 100% benign under the drift
+profiles, so no label-free score rule separates them.
+
+**Step C succeeded where both of those failed.** `dual_divergence.py` keeps the
+frozen feature and adds an adaptive one beside it. A *stateless* adaptive
+reference (distance between consecutive windows) improves NCSRD F1
+0.9792 → 0.9934, cutting false positives 76 → 8; the *stateful* EWMA version
+collapses it to 0.6365. So adaptive baseline information is genuinely useful —
+the constraint is that it must be represented without accumulating stream
+state. It is an opt-in configuration and is deliberately not in the 3 × 2.
 
 Expose the same `fit()` / `predict_proba()` / `predict()` interface as everyone
 else.

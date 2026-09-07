@@ -480,11 +480,90 @@ Measured on the NCSRD project-standard split (static / frozen baseline):
 
 This **confirms the premise of the faculty brief**: a static benign correlation
 baseline degrades badly once normal traffic changes shape — FPR variance rises
-221x and worst-case FPR reaches 0.80 under periodic URLLC. It also shows our
-EWMA implementation does not currently rescue it (see the known limitation
-below); the streaming baseline is worse on every profile. Detection latency is
+221x and worst-case FPR reaches 0.80 under periodic URLLC. Detection latency is
 0.0012–0.011 ms/sample throughout, comfortably inside the brief's sub-100 ms
 target.
+
+Nothing we tried rescues it without paying for it elsewhere. FPR variance by
+detector:
+
+| detector | stable | gradual drift | bursty mMTC | periodic URLLC | cost |
+|---|---:|---:|---:|---:|---|
+| static / frozen baseline | 0.000098 | 0.000262 | 0.001880 | 0.021684 | — |
+| streaming baseline as a feature | 0.076783 | 0.006616 | 0.064274 | 0.087530 | F1 → 0.2002 |
+| adaptive τ, pooled (step B) | 0.000098 | 0.000262 | 0.001880 | 0.021684 | inert |
+| adaptive τ, per-window | 0.000002 | 0.000009 | 0.000069 | **0.000113** | recall → 0.6047 |
+
+The last row is the only one that improves stability, and it does so by
+suppressing real attacks. See the step-B limitation below.
+
+---
+
+## Adaptive divergence as a second feature (step C)
+
+`src/proposed/dual_divergence.py` + `experiments/ncsrd/run_dual_divergence.py`.
+**Opt-in and experimental — deliberately absent from the 3 × 2 matrix.**
+
+The question: does an *adapting* correlation baseline carry information the
+fixed-reference divergence does not already have? Rather than replacing the
+frozen feature (which failed), this keeps it and adds a second column beside it:
+
+```
+[ 49 base features | d_frozen | d_adaptive ]   -> 51 columns
+```
+
+Every row below differs from the control in **exactly one column**, so each gap
+is that column's doing and nothing else. Measured on NCSRD, project-standard
+split, attack class:
+
+| config | P | R | F1 | FPR | ROC-AUC | τ | gain of adaptive col |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P6 (reference) | 0.9856 | 0.9728 | 0.9792 | 0.0009 | 0.9999 | 0.57 | — |
+| P8-control (frozen only) | 0.9856 | 0.9728 | 0.9792 | 0.0009 | 0.9999 | 0.57 | — |
+| P8-dual, **EWMA z** (stateful) | 0.6126 | 0.6623 | 0.6365 | 0.0278 | 0.9638 | 0.67 | 0.4499 |
+| P8-dual, **lagged** (stateless) | **0.9979** | **0.9890** | **0.9934** | **0.0001** | 0.9999 | 0.50 | 0.0149 |
+
+The control reproduces P6 exactly, which is what makes the comparison fair.
+
+**Answer: yes, but only in a stateless representation.** The lagged variant —
+Frobenius distance between consecutive windows' correlation matrices — improves
+every detection metric: false positives **76 → 8**, false negatives
+**146 → 59**, F1 +0.0142. It earns only 1.5% of total gain, so it is a small
+correction rather than a new backbone, but the correction is real.
+
+**The deciding property is statefulness, not adaptiveness.** Both references
+move with recent traffic. The difference:
+
+* `ewma_z` accumulates state across the whole stream, so the feature's meaning
+  depends on how far into the stream a row sits — and train and test sit at
+  different points. The model spends 45% of its gain on it and is misled.
+  Aligning mean and sd (0.91 sd → 0.15 sd) is **necessary but not sufficient**:
+  the feature's relationship to the label also shifts (train window-AUC 0.799
+  vs test 0.678).
+* `lagged` always compares to exactly one window back, so it is stationary by
+  construction.
+
+Two controls rule out the obvious alternative explanations:
+
+| control | result | rules out |
+|---|---|---|
+| oracle (perfect) benign gate on `ewma_z` | F1 **0.0000**, *worse* | attack contamination of the baseline |
+| a second *fixed* divergence column | F1 0.9714, gain 0.4295 | "a second divergence column is inherently harmful" |
+
+**Second dataset — weakly consistent, not confirmatory.** On Data4Cyber the
+direction repeats (lagged +0.0065 F1, EWMA z −0.0058) but the magnitude is
+within noise on ~3.5k test rows, and it required a non-standard 40-row
+correlation window: the default 120-row window equals the block length, which
+makes the lagged column constant. Those numbers are **not** comparable to the
+3 × 2 Data4Cyber cell, which uses the standard window.
+
+**Limitations.** Single split, single seed. The lagged column is 0.0 for any
+window with no predecessor inside its own block — ~34% of NCSRD test windows —
+so the feature is absent for a third of the data and still helps. Like the
+frozen divergence, it is a per-window statistic, so a row's feature value
+depends on other rows in the same window; that is the existing methodology's
+property, not a new one. It has not been run across seeds, and it is not in the
+headline matrix.
 
 ---
 
@@ -506,19 +585,73 @@ target.
   | train adaptive / serve frozen | 0.0827 | 0.0003 |
   | train adaptive / serve streaming | 0.0016 | 0.2119 |
 
-  The cause is structural, not a bug and not leakage. The Frobenius divergence
-  is only informative *against a fixed reference*; once the baseline chases the
-  data, divergence collapses toward zero for benign and attack windows alike and
-  the 50th feature stops carrying signal. Freezing the baseline is what makes
-  the feature work.
+  **The cause is a distribution/scale shift, not signal collapse.** An earlier
+  version of this note claimed the adaptive divergence "collapses toward zero
+  ... and stops carrying signal". That was measured and is **wrong**. The
+  adaptive signal is *stronger* than the frozen one:
+
+  | divergence variant | train mean ± sd | test mean ± sd | train→test shift | window AUC (test) |
+  |---|---|---|---:|---:|
+  | raw, frozen *(what the model uses)* | 13.49 ± 4.81 | 13.00 ± 4.69 | **0.10 sd** | 0.673 |
+  | raw, streaming | 4.68 ± 4.34 | 8.65 ± 5.26 | **0.91 sd** | 0.747 |
+  | z-scored, streaming | 0.34 ± 1.45 | −0.07 ± 1.23 | 0.28 sd | **0.868** |
+
+  What breaks is the *absolute scale*. The teacher learns split points around
+  ~13; a streaming baseline serves values around ~8.6, nearly a full standard
+  deviation away, so almost every row takes the wrong branch. The divergence
+  column is the single most important feature in the model (**47.9% of total
+  gain**, rank 1 of 42), which is why a scale shift in it is catastrophic
+  rather than merely unhelpful.
+
+  Caveats on those AUCs: they use an oracle benign gate as a best case, and the
+  test split has only 12 attack-majority windows out of 196, so they are noisy.
+  The scale measurement does not depend on either.
 
   So the requirement is met in mechanism (EWMA/CUSUM exist, run, and are gated
   on predictions rather than labels) but **not in effect** — the adaptation does
-  not change detections. Making it effective needs a different architecture, for
-  example using the adapting baseline for a standalone drift alarm rather than
-  as a classifier input. That is future work, not a fix.
-  `predict_proba_streaming()` and `_build_adaptive_training_features()` are kept
-  so both experiments stay reproducible. Report this honestly.
+  not change detections. `predict_proba_streaming()` and
+  `_build_adaptive_training_features()` are kept so both experiments stay
+  reproducible. Report this honestly.
+
+* **Routing the adaptation into the decision threshold instead (step B) was
+  implemented and also failed.** `src/proposed/adaptive_threshold.py` keeps the
+  classifier and its frozen features untouched and lets EWMA/CUSUM drive the
+  FPR-constrained threshold instead — the one place a scale shift cannot hurt,
+  since thresholds apply to probabilities. It is opt-in and off by default.
+  Measured on the NCSRD project-standard split:
+
+  | decision rule | P | R | F1 | FPR | periodic-URLLC FPR var |
+  |---|---:|---:|---:|---:|---:|
+  | static τ (P6 default) | 0.9856 | 0.9728 | **0.9792** | 0.0009 | 0.021684 |
+  | adaptive τ, pooled *(step B default)* | 0.9856 | 0.9728 | 0.9792 | 0.0009 | 0.021684 |
+  | adaptive τ, per-window | 0.9948 | 0.6047 | 0.7521 | 0.0002 | **0.000113** |
+
+  **Pooled mode is completely inert** — the threshold never moved once across
+  all four profiles. The reason is measurable: per-window alarm rates are
+  **bimodal**, with **0.0%** of windows in the 5–10% band on every stream. The
+  anti-contamination gate admits only windows below 10% alarms; the FPR budget
+  (α = 0.05) only bites above 5%. The gate therefore filters out exactly the
+  windows the budget would react to, and the accepted pool's 95th percentile is
+  0.007–0.015 against a threshold of 0.57. No gate setting fixes this, because
+  the band between the two is empty.
+
+  **Per-window mode works as the brief specifies and costs too much.** It cuts
+  FPR variance 192× under periodic URLLC (0.021684 → 0.000113, max 0.80 →
+  0.086) but drops recall to 0.6047, missing 2,119 attacks instead of 146.
+
+  **Why there is no middle ground.** Both failures are one fact seen twice. On
+  the real test split, windows with >10% alarms are **92.3% genuine attacks**;
+  under the synthetic benign profiles the identical-looking windows are 100%
+  benign by construction. Same observable, opposite correct response. A
+  threshold rule sees only scores, so it cannot separate them — and CUSUM
+  cannot either: it fires on 14.1% of drifted-benign windows versus 12.5% of
+  ordinary benign windows, which is no signal at all.
+
+  The honest conclusion for the *threshold* route: **benign drift and attack
+  are not separable by any label-free rule operating on the score
+  distribution.** Adaptation had to go back into the feature vector — which is
+  what step C did, successfully. See "Adaptive divergence as a second feature"
+  below.
 * **On the project-standard split, Proposed (P6) and Saurabh produce identical
   test predictions.** Verified directly: their `predict_proba` outputs match to
   0.0, and Saurabh's global threshold (0.5700) and the proposed constrained

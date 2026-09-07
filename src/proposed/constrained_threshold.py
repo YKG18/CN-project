@@ -210,6 +210,62 @@ class ConstrainedThreshold:
 
         return self
 
+    def fit_benign_only(
+        self,
+        benign_scores: np.ndarray,
+    ) -> float:
+        """
+        Select a threshold from assumed-benign scores alone, without labels.
+
+        On a pool of scores believed to be benign the false-positive rate at
+        tau is just the fraction of the pool at or above tau, so the
+        Neyman-Pearson rule -- smallest tau with FPR <= alpha -- needs no
+        labels at all. Same grid and same constraint as `find_optimal_threshold`;
+        only the source of the FPR estimate differs.
+
+        This is what the online threshold channel uses, where labels do not
+        exist by construction. It does not touch `threshold_`, so a fitted
+        ConstrainedThreshold keeps whatever `fit()` learned.
+
+        The search is bounded by `threshold_max`. If even that cut leaves the
+        empirical FPR above alpha, `threshold_max` is returned as the tightest
+        decision the configured grid allows -- the budget is then infeasible,
+        not silently satisfied. Callers that must guarantee the bound should
+        widen `threshold_max` or check the returned threshold against it.
+
+        Returns
+        -------
+        float
+            The smallest grid threshold with empirical FPR <= alpha, or
+            `threshold_max` when no grid threshold achieves it.
+        """
+
+        scores = np.asarray(
+            benign_scores,
+            dtype=float,
+        ).reshape(-1)
+
+        if scores.size == 0:
+            raise ValueError("benign_scores cannot be empty.")
+
+        if not np.all(np.isfinite(scores)):
+            raise ValueError(
+                "benign_scores contains NaN or infinite values."
+            )
+
+        # Candidates ascend, so the first satisfying threshold is the
+        # smallest one -- i.e. the most sensitive cut that still respects
+        # the budget.
+        for threshold in self._candidate_thresholds():
+            fpr = float(
+                np.mean(scores >= threshold)
+            )
+
+            if fpr <= self.alpha:
+                return float(threshold)
+
+        return float(self.threshold_max)
+
     def predict(self, p_score: np.ndarray) -> np.ndarray:
         """Convert attack probabilities into binary predictions."""
 
