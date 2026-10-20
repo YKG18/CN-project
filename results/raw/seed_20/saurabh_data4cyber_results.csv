@@ -1,0 +1,2 @@
+dataset,method,config,feature_set,split_policy,seed,precision,recall,f1,fpr,accuracy,weighted_f1,roc_auc,tp,fp,fn,tn,threshold,threshold_selected_on,n_train,n_test,inference_latency_ms,model_size_kb,notes
+data4cyber,saurabh,saurabh_full,data4cyber_140,project_standard,20,0.862403,0.927083,0.893574,0.182519,0.878021,0.877266,0.9015,1780,284,140,1272,0.5,validation_adaptive,8598,3476,0.027749,0.0,Saurabh pipeline (train_time=8.92s)

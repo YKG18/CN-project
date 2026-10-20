@@ -1,0 +1,2 @@
+dataset,method,config,feature_set,split_policy,seed,precision,recall,f1,fpr,accuracy,weighted_f1,roc_auc,tp,fp,fn,tn,threshold,threshold_selected_on,n_train,n_test,inference_latency_ms,model_size_kb,notes
+data4cyber,base,base_paper,data4cyber_140,project_standard,11,0.849457,0.9375,0.89131,0.205013,0.873705,0.872503,0.896088,1800,319,120,1237,0.248343,validation,8598,3476,0.001931,0.0,Base XGBoost (train_time=2.70s)
