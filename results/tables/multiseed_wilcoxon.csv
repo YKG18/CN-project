@@ -1,0 +1,29 @@
+dataset,metric,proposed_method,proposed_config,baseline_method,baseline_config,baseline_label,n,statistic,p_value,alternative,mean_diff,note,p_adj_bonferroni,m_tests,significant_0.05,marker
+ncsrd,f1,proposed,P6,base,base_paper,Base Paper,20,208.0,2.86102294921875e-06,greater,0.14204469999999997,,4.00543212890625e-05,14,True,***
+ncsrd,precision,proposed,P6,base,base_paper,Base Paper,20,210.0,9.5367431640625e-07,greater,0.23625754999999998,,1.33514404296875e-05,14,True,***
+ncsrd,recall,proposed,P6,base,base_paper,Base Paper,20,166.0,0.0107421875,greater,0.024794899999999998,,0.150390625,14,False,ns
+ncsrd,fpr,proposed,P6,base,base_paper,Base Paper,20,0.0,9.5367431640625e-07,less,-0.02094565,,1.33514404296875e-05,14,True,***
+ncsrd,accuracy,proposed,P6,base,base_paper,Base Paper,20,210.0,9.5367431640625e-07,greater,0.0211853,,1.33514404296875e-05,14,True,***
+ncsrd,roc_auc,proposed,P6,base,base_paper,Base Paper,20,210.0,9.5367431640625e-07,greater,0.005108799999999997,,1.33514404296875e-05,14,True,***
+ncsrd,inference_latency_ms,proposed,P6,base,base_paper,Base Paper,20,210.0,1.0,less,0.00130255,,1.0,14,False,ns
+ncsrd,f1,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,107.0,0.17452240422876747,greater,-0.005799500000000008,,1.0,14,False,ns
+ncsrd,precision,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,171.0,9.804667726686511e-05,greater,0.023674100000000003,,0.0013726534817361117,14,True,**
+ncsrd,recall,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,0.9995092301237392,greater,-0.031119450000000003,,1.0,14,False,ns
+ncsrd,fpr,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,9.804667726686511e-05,less,-0.00172485,,0.0013726534817361117,14,True,**
+ncsrd,accuracy,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,108.0,0.16357193727494607,greater,-0.00032065000000000565,,1.0,14,False,ns
+ncsrd,roc_auc,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,1.0,greater,0.0,all paired differences are zero,1.0,14,False,ns
+ncsrd,inference_latency_ms,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,9.5367431640625e-07,less,-0.0024038,,1.33514404296875e-05,14,True,***
+data4cyber,f1,proposed,P6,base,base_paper,Base Paper,20,125.0,0.23745250701904297,greater,0.0009439499999999934,,1.0,14,False,ns
+data4cyber,precision,proposed,P6,base,base_paper,Base Paper,20,203.0,1.811981201171875e-05,greater,0.008807699999999991,,0.0002536773681640625,14,True,***
+data4cyber,recall,proposed,P6,base,base_paper,Base Paper,20,23.5,0.9988304252197981,greater,-0.008333200000000008,,1.0,14,False,ns
+data4cyber,fpr,proposed,P6,base,base_paper,Base Paper,20,5.5,0.00010163229055153101,less,-0.015456300000000001,,0.0014228520677214342,14,True,**
+data4cyber,accuracy,proposed,P6,base,base_paper,Base Paper,20,151.5,0.04125790664428306,greater,0.0023159499999999998,,0.5776106930199628,14,False,ns
+data4cyber,roc_auc,proposed,P6,base,base_paper,Base Paper,20,185.0,0.0008449554443359375,greater,0.004948649999999999,,0.011829376220703125,14,True,*
+data4cyber,inference_latency_ms,proposed,P6,base,base_paper,Base Paper,20,210.0,1.0,less,0.011128599999999999,,1.0,14,False,ns
+data4cyber,f1,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,9.0,0.8962107788321878,greater,-0.00020365000000000522,,1.0,14,False,ns
+data4cyber,precision,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,36.0,0.005859342799884314,greater,0.0011416500000000108,,0.0820307991983804,14,False,ns
+data4cyber,recall,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,0.9942430859615773,greater,-0.0017447000000000046,,1.0,14,False,ns
+data4cyber,fpr,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,0.005808022449631236,less,-0.0020886499999999975,,0.0813123142948373,14,False,ns
+data4cyber,accuracy,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,12.0,0.37657618238295726,greater,-2.869999999999817e-05,,1.0,14,False,ns
+data4cyber,roc_auc,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,1.0,greater,0.0,all paired differences are zero,1.0,14,False,ns
+data4cyber,inference_latency_ms,proposed,P6,saurabh,saurabh_full,Saurabh Extension,20,0.0,9.5367431640625e-07,less,-0.021226649999999996,,1.33514404296875e-05,14,True,***

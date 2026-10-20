@@ -3,19 +3,27 @@
 CLI Entrypoint for running Base paper, Saurabh extension, and Proposed methods
 across NCSRD and Data4Cyber datasets.
 
+The evaluation split is the frozen project-standard partition. ``--seed``
+controls training-time randomness (XGBoost, undersampling, SHAP sampling),
+not a new data split.
+
 Usage:
-    python run_experiment.py --dataset ncsrd --method base --config base_paper --split-policy project_standard --save
-    python run_experiment.py --dataset ncsrd --method saurabh --config saurabh_full --save
-    python run_experiment.py --dataset ncsrd --method proposed --config P6 --save
-    python run_experiment.py --dataset data4cyber --method base --save
+    python run_experiment.py --dataset ncsrd --method base --config base_paper --split-policy project_standard --save --seed 1
+    python run_experiment.py --dataset ncsrd --method saurabh --config saurabh_full --save --seed 1
+    python run_experiment.py --dataset ncsrd --method proposed --config P6 --save --seed 1
+    python run_experiment.py --dataset data4cyber --method base --save --seed 1
+
+Multi-seed (Review 3 / Member 1):
+    python scripts/run_multiseed.py --seeds 1-20 --save
+    python scripts/analyze_multiseed.py
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -24,6 +32,7 @@ from typing import Any, Dict
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "common" / "data"))
 
@@ -254,7 +263,19 @@ def run_proposed_experiment(args: argparse.Namespace) -> Dict[str, Any]:
     return res
 
 
-def main(argv=None) -> int:
+def result_json_name(method: str, dataset: str, config_name: str, split_policy: str, seed: int) -> str:
+    """Unique JSON filename so successive seeds do not overwrite each other."""
+    return f"{method}_{dataset}_{config_name}_{split_policy}_seed{seed}.json"
+
+
+def seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and hash-affecting RNGs used during training."""
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -271,15 +292,24 @@ def main(argv=None) -> int:
         default=None,
         help="Method-specific configuration name, e.g., base_paper or P6",
     )
-    p.add_argument("--seed", type=int, default=config.SEED, help="Random seed")
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=config.SEED,
+        help="Training random seed (does not re-split the frozen index)",
+    )
     p.add_argument("--save", action="store_true", help="Save results to CSV and JSON under results/raw/")
     p.add_argument(
         "--output-dir",
         default="results/raw",
-        help="Directory where result files will be saved",
+        help="Directory where result files will be saved (use results/raw/seed_<n>/ for multi-seed runs)",
     )
+    return p
 
-    args = p.parse_args(argv)
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    seed_everything(args.seed)
 
     print(
         f"=== Running Experiment: dataset={args.dataset} method={args.method} "
@@ -317,7 +347,9 @@ def main(argv=None) -> int:
         Evaluator.save_d6_row(d6_row, csv_path)
         print(f"[Results] Appended D6 row to {csv_path}")
 
-        json_path = out_dir / f"{args.method}_{args.dataset}_{d6_row['config']}_{args.split_policy}.json"
+        json_path = out_dir / result_json_name(
+            args.method, args.dataset, str(d6_row["config"]), args.split_policy, args.seed
+        )
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(res, f, indent=2)
         print(f"[Results] Wrote detail JSON to {json_path}")
